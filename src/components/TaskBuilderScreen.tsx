@@ -1,0 +1,1584 @@
+import React, { useState, useEffect } from 'react';
+import { ArrowLeft, Plus, Save, Trash2, Database, LayoutTemplate, Box, CheckCircle2, Play, Link as LinkIcon, Upload, X, Users, Edit, Eye, Loader2, ClipboardList } from 'lucide-react';
+import { EvalDataset, EvalTemplate, EvalTask, EvalDimension, EvaluationItem } from '../types';
+import { db, auth } from '../firebase';
+import { collection, onSnapshot, addDoc, serverTimestamp, query, orderBy, doc, updateDoc, deleteDoc, where, setDoc, getDocs } from 'firebase/firestore';
+import { ConfirmModal } from './ConfirmModal';
+import Papa from 'papaparse';
+import MediaRenderer from './MediaRenderer';
+
+interface TaskBuilderScreenProps {
+  projectId?: string;
+  onBack: () => void;
+  initialMode?: 'create' | 'list';
+}
+
+export default function TaskBuilderScreen({ projectId, onBack, initialMode = 'create' }: TaskBuilderScreenProps) {
+  const [tasks, setTasks] = useState<EvalTask[]>([]);
+  const [datasets, setDatasets] = useState<EvalDataset[]>([]);
+  const [templates, setTemplates] = useState<EvalTemplate[]>([]);
+  const [users, setUsers] = useState<{uid: string, email: string, displayName: string}[]>([]);
+  
+  const [isCreating, setIsCreating] = useState(initialMode === 'create');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [viewingTask, setViewingTask] = useState<EvalTask | null>(null);
+  const [viewingTaskItems, setViewingTaskItems] = useState<EvaluationItem[]>([]);
+  const [loadingItems, setLoadingItems] = useState(false);
+  const [newTask, setNewTask] = useState<Partial<EvalTask>>({
+    name: '',
+    projectId: projectId || '',
+    datasetId: '',
+    templateId: '',
+    outputType: 'text',
+    models: [{ id: 'model-a', name: 'Model A' }, { id: 'model-b', name: 'Model B' }],
+    assignees: [],
+    status: 'draft'
+  });
+
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [csvData, setCsvData] = useState<any[]>([]);
+  const [csvHeaders, setCsvHeaders] = useState<string[]>([]);
+  
+  // Wizard State
+  const [inputColumns, setInputColumns] = useState<string[]>([]);
+  const [modelColumns, setModelColumns] = useState<string[]>([]);
+  const [saveDatasetToPlatform, setSaveDatasetToPlatform] = useState(true);
+  const [showPreview, setShowPreview] = useState(false);
+  const [inputType, setInputType] = useState<'text' | 'text_image' | 'text_audio' | 'multi_turn' | 'other'>('text');
+
+  // Inline Template Creation State
+  const [showCreateTemplateModal, setShowCreateTemplateModal] = useState(false);
+  const [newTemplateName, setNewTemplateName] = useState('');
+  const [newTemplateParadigm, setNewTemplateParadigm] = useState<'GSB' | 'MOS' | 'Arena'>('GSB');
+  const [taskToDelete, setTaskToDelete] = useState<string | null>(null);
+  
+  // Item Editing State
+  const [editingItemId, setEditingItemId] = useState<string | null>(null);
+  const [editItemForm, setEditItemForm] = useState<any>({});
+
+  useEffect(() => {
+    if (projectId) {
+      setNewTask(prev => ({ ...prev, projectId }));
+    }
+  }, [projectId]);
+
+  useEffect(() => {
+    if (!auth.currentUser) return;
+
+    // Filter tasks by projectId if provided
+    const tasksRef = collection(db, 'evalTasks');
+    const tasksQuery = projectId 
+      ? query(tasksRef, where('projectId', '==', projectId))
+      : query(tasksRef);
+      
+    const unsubscribeTasks = onSnapshot(tasksQuery, (snapshot) => {
+      const fetchedTasks: EvalTask[] = [];
+      snapshot.forEach((docSnap) => {
+        fetchedTasks.push({ id: docSnap.id, ...docSnap.data() } as EvalTask);
+      });
+      // Sort in memory since we might not have a composite index for projectId + createdAt
+      fetchedTasks.sort((a, b) => b.createdAt - a.createdAt);
+      setTasks(fetchedTasks);
+    });
+
+    const datasetsQuery = query(collection(db, 'evalDatasets'), orderBy('createdAt', 'desc'));
+    const unsubscribeDatasets = onSnapshot(datasetsQuery, (snapshot) => {
+      const fetchedDatasets: EvalDataset[] = [];
+      snapshot.forEach((docSnap) => {
+        fetchedDatasets.push({ id: docSnap.id, ...docSnap.data() } as EvalDataset);
+      });
+      setDatasets(fetchedDatasets);
+    });
+
+    const templatesQuery = query(collection(db, 'evalTemplates'), orderBy('createdAt', 'desc'));
+    const unsubscribeTemplates = onSnapshot(templatesQuery, (snapshot) => {
+      const fetchedTemplates: EvalTemplate[] = [];
+      snapshot.forEach((docSnap) => {
+        fetchedTemplates.push({ id: docSnap.id, ...docSnap.data() } as EvalTemplate);
+      });
+      setTemplates(fetchedTemplates);
+      setLoading(false);
+    });
+
+    const usersQuery = query(collection(db, 'users'));
+    const unsubscribeUsers = onSnapshot(usersQuery, (snapshot) => {
+      const fetchedUsers: any[] = [];
+      snapshot.forEach((docSnap) => {
+        fetchedUsers.push(docSnap.data());
+      });
+      setUsers(fetchedUsers);
+    });
+
+    return () => {
+      unsubscribeTasks();
+      unsubscribeDatasets();
+      unsubscribeTemplates();
+      unsubscribeUsers();
+    };
+  }, []);
+
+  const validateSetup = () => {
+    if (!newTask.name) return "请填写物料名称";
+    if (!newTask.templateId) return "请选择评测模板";
+    
+    const selectedTemplate = templates.find(t => t.id === newTask.templateId);
+    if (!selectedTemplate) return "选择的评测模板无效";
+
+    if (csvData.length > 0) {
+      if (inputColumns.length === 0) return "请至少选择一个输入列";
+      if (selectedTemplate.paradigm === 'GSB' && modelColumns.length < 2) {
+        return "GSB 评测模板需要至少两列模型结果，请补充选择。";
+      }
+      if (selectedTemplate.paradigm === 'MOS' && modelColumns.length < 1) {
+        return "MOS 评测模板需要至少一列模型结果，请补充选择。";
+      }
+    } else if (!newTask.datasetId) {
+      return "请选择评测集或上传包含结果的CSV文件";
+    }
+    return null;
+  };
+
+  const handleCreateTask = async () => {
+    if (!auth.currentUser || isSubmitting) return;
+    
+    const validationError = validateSetup();
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      let finalDatasetId = newTask.datasetId;
+
+      // If CSV data is uploaded, create a new Dataset first if requested
+      if (csvData.length > 0 && !newTask.datasetId && saveDatasetToPlatform) {
+        const datasetItems = csvData.map((row, idx) => {
+          const item: any = { id: row.id || `item-${Date.now()}-${idx}` };
+          // Copy all fields except the model result columns
+          Object.keys(row).forEach(key => {
+            if (!modelColumns.includes(key)) {
+              item[key] = row[key];
+            }
+          });
+          // Ensure prompt is set if not already
+          if (inputColumns.length > 0) {
+            if (inputColumns.length === 1) {
+              item.prompt = row[inputColumns[0]];
+            } else {
+              item.inputs = {};
+              inputColumns.forEach(col => {
+                item.inputs[col] = row[col];
+              });
+            }
+          }
+          return item;
+        });
+
+        // Deduplication logic: check if an identical dataset already exists
+        const isSameItem = (itemA: any, itemB: any) => {
+          const { id: idA, ...restA } = itemA;
+          const { id: idB, ...restB } = itemB;
+          return JSON.stringify(restA) === JSON.stringify(restB);
+        };
+
+        const existingDataset = datasets.find(d => {
+          if (!d.items || d.items.length !== datasetItems.length) return false;
+          return d.items.every((item, idx) => isSameItem(item, datasetItems[idx]));
+        });
+
+        if (existingDataset) {
+          finalDatasetId = existingDataset.id;
+        } else {
+          // Generate input schema based on the saved keys
+          const inputSchema = Object.keys(datasetItems[0] || {})
+            .filter(key => key !== 'id')
+            .map(key => ({
+              key,
+              label: inputColumns.includes(key) ? `输入: ${key}` : key,
+              type: 'text' as const
+            }));
+          
+          // Ensure 'id' is always the first schema field
+          inputSchema.unshift({ key: 'id', label: '用例ID', type: 'text' as const });
+
+          const newDataset = {
+            name: `${newTask.name} - 自动提取评测集`.substring(0, 99),
+            description: '通过上传带有生成结果的CSV自动提取的评测集',
+            tags: ['自动提取', 'CSV导入'],
+            inputSchema: inputSchema,
+            inputType,
+            items: datasetItems,
+            creatorUid: auth.currentUser.uid,
+            creatorName: auth.currentUser.displayName || auth.currentUser.email || 'Anonymous',
+            createdAt: Date.now(),
+            updatedAt: Date.now()
+          };
+
+          try {
+            const dsRef = await addDoc(collection(db, 'evalDatasets'), newDataset);
+            finalDatasetId = dsRef.id;
+          } catch (err: any) {
+            console.error("Error creating dataset:", err);
+            throw new Error("创建评测集失败: " + err.message);
+          }
+        }
+      }
+
+      // Update models array based on selected model columns if using CSV or existing dataset
+      const taskModels = (csvData.length > 0 || newTask.datasetId) && modelColumns.length > 0 ? modelColumns.map((col, idx) => ({
+        id: `model-${idx}`,
+        name: col
+      })) : newTask.models;
+
+      const taskData = {
+        ...newTask,
+        projectId: projectId || newTask.projectId || '',
+        datasetId: finalDatasetId || 'external-csv',
+        models: taskModels,
+        inputType,
+        creatorUid: auth.currentUser.uid,
+        creatorName: auth.currentUser.displayName || auth.currentUser.email || 'Anonymous',
+        createdAt: Date.now(),
+        hasImportedData: csvData.length > 0 || !!newTask.datasetId,
+        totalItems: csvData.length > 0 ? csvData.length : (datasets.find(d => d.id === finalDatasetId)?.items?.length || 0),
+        progress: {}
+      };
+
+      let docRef;
+      try {
+        docRef = await addDoc(collection(db, 'evalTasks'), taskData);
+      } catch (err: any) {
+        console.error("Error creating task doc:", err);
+        throw new Error("创建物料记录失败: " + err.message);
+      }
+
+      const dataToSave = csvData.length > 0 ? csvData : (datasets.find(d => d.id === finalDatasetId)?.items || []);
+
+      if (dataToSave.length > 0 && docRef) {
+        // Save data to a subcollection
+        const itemsRef = collection(db, 'evalTasks', docRef.id, 'items');
+        try {
+          for (const row of dataToSave) {
+            let startImageUrl: string | undefined;
+            let referenceUrls: string[] = [];
+            
+            inputColumns.forEach(col => {
+              const val = row[col];
+              if (typeof val === 'string') {
+                const urls = val.match(/https?:\/\/[^\s"'\t|,;>]+/g);
+                if (urls) {
+                  const lowerCol = col.toLowerCase();
+                  urls.forEach(u => {
+                    if (lowerCol.includes('start') || lowerCol.includes('首帧') || lowerCol.includes('first')) {
+                      if (!startImageUrl) startImageUrl = u;
+                      else referenceUrls.push(u);
+                    } else if (lowerCol.includes('ref') || lowerCol.includes('参考')) {
+                      referenceUrls.push(u);
+                    } else {
+                      if (!startImageUrl) startImageUrl = u;
+                      else referenceUrls.push(u);
+                    }
+                  });
+                }
+              }
+            });
+
+            const itemData: any = {
+              prompt: inputColumns.length === 1 ? row[inputColumns[0]] : inputColumns.map(col => `[${col}]: ${row[col]}`).join('\n'),
+              inputs: inputColumns.reduce((acc, col) => ({ ...acc, [col]: row[col] }), {}),
+              modelA_Url: modelColumns[0] ? row[modelColumns[0]] : '',
+              modelB_Url: modelColumns[1] ? row[modelColumns[1]] : '',
+              type: newTask.outputType || 'text',
+              originalData: row
+            };
+            
+            if (startImageUrl) itemData.startImageUrl = startImageUrl;
+            if (referenceUrls.length > 0) itemData.referenceUrls = referenceUrls;
+
+            await addDoc(itemsRef, itemData);
+          }
+        } catch (err: any) {
+          console.error("Error creating task items:", err);
+          throw new Error("保存物料数据失败: " + err.message);
+        }
+      }
+
+      setIsCreating(false);
+      setShowPreview(false);
+      setNewTask({
+        name: '',
+        projectId: projectId || '',
+        datasetId: '',
+        templateId: '',
+        outputType: 'text',
+        models: [{ id: 'model-a', name: 'Model A' }, { id: 'model-b', name: 'Model B' }],
+        status: 'draft',
+        externalResultsLink: ''
+      });
+      setCsvData([]);
+      setCsvHeaders([]);
+      setInputColumns([]);
+      setModelColumns([]);
+      setError(null);
+      setSuccessMessage("创建成功！");
+      setTimeout(() => setSuccessMessage(null), 3000);
+    } catch (err: any) {
+      console.error("Error creating task:", err);
+      setError("创建物料失败: " + err.message);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const [isPasting, setIsPasting] = useState(false);
+  const [pastedText, setPastedText] = useState('');
+
+  const processCsvData = (text: string, isPasted: boolean = false) => {
+    try {
+      if (!text || text.trim() === '') {
+        setError('数据为空');
+        return;
+      }
+
+      const lines = text.trim().split('\n').map(l => l.trim()).filter(Boolean);
+      const rawHasUrls = lines.some(l => l.includes('http'));
+
+      // Helper function for aggressive parsing
+      const runAggressiveParser = () => {
+        const parsedData: any[] = [];
+        let maxUrls = 0;
+        
+        const extractUrls = (line: string) => {
+          const parts = line.split(/(?=https?:\/\/)/);
+          return parts
+            .filter(p => p.trim().startsWith('http'))
+            .map(p => {
+              const match = p.match(/^https?:\/\/[^\s"'\t|,;>]+/);
+              return match ? match[0] : '';
+            })
+            .filter(Boolean);
+        };
+
+        lines.forEach(line => {
+          const urls = extractUrls(line);
+          maxUrls = Math.max(maxUrls, urls.length);
+        });
+
+        if (maxUrls > 0) {
+          for (let i = 0; i < lines.length; i++) {
+            const line = lines[i];
+            const urls = extractUrls(line);
+            
+            if (i === 0 && urls.length === 0 && maxUrls > 0) continue;
+
+            if (urls.length > 0) {
+              const firstUrlIndex = line.indexOf(urls[0]);
+              let prompt = line.substring(0, firstUrlIndex).trim();
+              prompt = prompt.replace(/^[,;\t|]+|[,;\t|]+$/g, '').trim();
+              prompt = prompt.replace(/^["']|["']$/g, '').trim();
+              
+              const row: any = { 'Video Prompt': prompt || 'Empty Prompt' };
+              
+              if (maxUrls === 3) {
+                row['Start Image'] = urls[0] || '';
+                row['Slot_1_Out'] = urls[1] || '';
+                row['Slot_2_Out'] = urls[2] || '';
+              } else if (maxUrls === 2) {
+                row['Slot_1_Out'] = urls[0] || '';
+                row['Slot_2_Out'] = urls[1] || '';
+              } else {
+                urls.forEach((url, idx) => {
+                  row[`URL_${idx + 1}`] = url;
+                });
+              }
+              parsedData.push(row);
+            }
+          }
+          return parsedData;
+        }
+        return null;
+      };
+
+      let data: any[] = [];
+      let headers: string[] = [];
+
+      // 1. Try PapaParse first
+      let delimiter = undefined;
+      if (text.includes('\t')) {
+        delimiter = '\t';
+      }
+
+      let results = Papa.parse(text, {
+        header: true,
+        skipEmptyLines: true,
+        delimiter: delimiter,
+        transform: (value) => value.trim(),
+        transformHeader: (header) => header.trim(),
+      });
+
+      data = results.data as any[];
+      headers = results.meta.fields || (data.length > 0 ? Object.keys(data[0]) : []);
+
+      // Check if PapaParse failed to separate URLs or missed them entirely due to delimiter confusion
+      let hasMergedUrls = false;
+      let hasUrlInParsedData = false;
+      if (data.length > 0) {
+        for (let i = 0; i < Math.min(5, data.length); i++) {
+          const rowVals = Object.values(data[i]);
+          if (rowVals.some(val => typeof val === 'string' && val.includes('http'))) {
+            hasUrlInParsedData = true;
+          }
+          if (rowVals.some(val => typeof val === 'string' && (val.match(/https?:\/\//g) || []).length > 1)) {
+            hasMergedUrls = true;
+          }
+        }
+      }
+
+      const papaParseFailed = headers.length <= 1 || hasMergedUrls || (rawHasUrls && !hasUrlInParsedData);
+
+      // 2. If standard parsing fails OR URLs are merged OR URLs are missing from parsed data
+      if (papaParseFailed) {
+        // Try splitting by tabs first, as it's more reliable than aggressive parser for preserving columns
+        const firstLine = lines[0];
+        const splitHeaders = firstLine.split('\t').map(s => s.trim());
+        if (splitHeaders.length > 1) {
+          headers = splitHeaders;
+          data = lines.slice(1).map(line => {
+            const values = line.split('\t').map(s => s.trim());
+            const row: any = {};
+            headers.forEach((h, i) => {
+              row[h] = values[i] || '';
+            });
+            return row;
+          });
+        } else if (rawHasUrls) {
+          // Fallback to aggressive parser only if tab splitting also fails
+          const aggressiveData = runAggressiveParser();
+          if (aggressiveData && aggressiveData.length > 0) {
+            data = aggressiveData;
+            headers = Object.keys(data[0]);
+          }
+        }
+      }
+
+      if (data.length === 0) {
+        setError("数据为空或解析失败");
+        return;
+      }
+
+      if (headers.length <= 1) {
+        setError("未能识别出多个列。请确保粘贴的内容包含表头，且列之间有明显的空格或制表符。");
+      } else {
+        setError(null);
+      }
+
+    setCsvHeaders(headers);
+    setCsvData(data);
+    
+    // Auto-detect prompt column
+    const promptCol = headers.find(h => 
+      h.toLowerCase().includes('prompt') || 
+      h.includes('提示词') || 
+      h.includes('输入')
+    );
+    if (promptCol) setInputColumns([promptCol]);
+    else setInputColumns([headers[0]]);
+
+    // Auto-detect start image
+    const startImgCol = headers.find(h => 
+      h.toLowerCase().includes('image') || 
+      h.includes('首帧') || 
+      h.includes('Start Image') ||
+      h.includes('输入图')
+    );
+    if (startImgCol) {
+      setInputColumns(prev => [...new Set([...prev, startImgCol])]);
+    }
+
+    // Auto-detect model columns
+    const models = headers.filter(h => 
+      h !== promptCol && 
+      h !== startImgCol &&
+      !h.toLowerCase().includes('id') && 
+      !h.includes('结果') &&
+      (h.includes('Slot') || h.includes('Out') || h.includes('Model') || h.includes('模型') || h.includes('URL_'))
+    );
+    
+    if (models.length >= 2) {
+      setModelColumns(models.slice(0, 2));
+    } else {
+      const otherCols = headers.filter(h => h !== promptCol && h !== startImgCol && !h.toLowerCase().includes('id'));
+      setModelColumns(otherCols.slice(0, 2));
+    }
+    
+    // Auto-detect output type
+    const firstRow = data[0];
+    let detectedType: 'text' | 'image' | 'video' | 'markdown' = 'text';
+    const sampleCol = modelColumns.length > 0 ? modelColumns[0] : (headers.length > 1 ? headers[1] : null);
+    
+    if (sampleCol) {
+      const sampleOutput = firstRow[sampleCol];
+      if (typeof sampleOutput === 'string') {
+        const cleanSample = sampleOutput.replace(/[\u200B-\u200D\uFEFF]/g, '').trim().replace(/^["']|["']$/g, '');
+        if (cleanSample.match(/\.(mp4|webm|ogg)$/i) || cleanSample.includes('video')) {
+          detectedType = 'video';
+        } else if (cleanSample.match(/\.(jpeg|jpg|gif|png|webp)$/i) || cleanSample.includes('image')) {
+          detectedType = 'image';
+        }
+      }
+    }
+    
+    setNewTask(prev => ({
+      ...prev,
+      datasetId: '',
+      outputType: detectedType
+    }));
+    
+    if (isPasted) setIsPasting(false);
+    } catch (err: any) {
+      console.error("Error parsing CSV:", err);
+      setError("解析失败: " + err.message);
+    }
+  };
+
+  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const text = e.target?.result as string;
+      processCsvData(text);
+    };
+    reader.readAsText(file);
+  };
+
+  const handlePasteSubmit = () => {
+    if (!pastedText.trim()) return;
+    processCsvData(pastedText, true);
+  };
+
+  const handleQuickCreateTemplate = async () => {
+    if (!newTemplateName.trim() || !auth.currentUser) return;
+
+    let defaultDimensions: EvalDimension[] = [];
+    if (newTemplateParadigm === 'GSB') {
+      defaultDimensions = [{ id: `dim-${Date.now()}`, name: '整体评价', description: '综合评估', type: 'radio_select', options: ['A 更好', 'B 更好', '平局'] }];
+    } else if (newTemplateParadigm === 'MOS') {
+      defaultDimensions = [{ id: `dim-${Date.now()}`, name: '整体质量', description: '1-5分综合评分', type: 'star_rating' }];
+    } else {
+      defaultDimensions = [{ id: `dim-${Date.now()}`, name: '竞技场排位', description: '选择你认为更好的模型', type: 'radio_select', options: ['模型 A', '模型 B', '平局', '都很差'] }];
+    }
+
+    const newTemplate: EvalTemplate = {
+      id: `tpl-${Date.now()}`,
+      name: newTemplateName,
+      description: '快速创建的评测模板',
+      paradigm: newTemplateParadigm,
+      dimensions: defaultDimensions,
+      creatorUid: auth.currentUser.uid,
+      creatorName: auth.currentUser.displayName || auth.currentUser.email || 'Unknown',
+      createdAt: Date.now()
+    };
+
+    try {
+      await setDoc(doc(db, 'evalTemplates', newTemplate.id), newTemplate);
+      setNewTask(prev => ({ ...prev, templateId: newTemplate.id }));
+      setShowCreateTemplateModal(false);
+      setNewTemplateName('');
+      setNewTemplateParadigm('GSB');
+    } catch (err: any) {
+      console.error("Error creating template:", err);
+      setError("创建模板失败: " + err.message);
+    }
+  };
+
+  const handleDeleteTask = (id: string) => {
+    setTaskToDelete(id);
+  };
+
+  const confirmDeleteTask = async () => {
+    if (!taskToDelete) return;
+    try {
+      await deleteDoc(doc(db, 'evalTasks', taskToDelete));
+      setTaskToDelete(null);
+    } catch (err: any) {
+      console.error("Error deleting task:", err);
+      setError("删除失败: " + err.message);
+      setTaskToDelete(null);
+    }
+  };
+
+  const handleViewTask = async (task: EvalTask) => {
+    setViewingTask(task);
+    setLoadingItems(true);
+    try {
+      let items: EvaluationItem[] = [];
+      const itemsSnapshot = await getDocs(collection(db, `evalTasks/${task.id}/items`));
+      if (!itemsSnapshot.empty) {
+        items = itemsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as EvaluationItem));
+      } else if (task.datasetId && task.datasetId !== 'external-csv') {
+        const dataset = datasets.find(d => d.id === task.datasetId);
+        if (dataset && dataset.items) {
+          items = dataset.items;
+        }
+      }
+      setViewingTaskItems(items);
+    } catch (err) {
+      console.error('Error fetching task items:', err);
+      setError('加载物料详情失败');
+    } finally {
+      setLoadingItems(false);
+    }
+  };
+
+  const handleSaveItemEdit = async (itemId: string) => {
+    if (!viewingTask) return;
+    try {
+      const itemRef = doc(db, 'evalTasks', viewingTask.id, 'items', itemId);
+      await updateDoc(itemRef, editItemForm);
+      setViewingTaskItems(prev => prev.map(item => item.id === itemId ? { ...item, ...editItemForm } : item));
+      setEditingItemId(null);
+    } catch (error) {
+      console.error("Error updating item:", error);
+      setError("更新用例失败");
+    }
+  };
+
+  const handleUpdateTaskStatus = async (id: string, status: 'draft' | 'active' | 'completed') => {
+    try {
+      await updateDoc(doc(db, 'evalTasks', id), { status });
+    } catch (err: any) {
+      console.error("Error updating task status:", err);
+      setError("更新状态失败: " + err.message);
+    }
+  };
+
+  const addModel = () => {
+    setNewTask(prev => ({
+      ...prev,
+      models: [...(prev.models || []), { id: `model-${Date.now()}`, name: `Model ${prev.models?.length ? prev.models.length + 1 : 1}` }]
+    }));
+  };
+
+  const updateModelName = (index: number, name: string) => {
+    setNewTask(prev => {
+      const newModels = [...(prev.models || [])];
+      newModels[index].name = name;
+      return { ...prev, models: newModels };
+    });
+  };
+
+  const removeModel = (index: number) => {
+    setNewTask(prev => {
+      const newModels = [...(prev.models || [])];
+      newModels.splice(index, 1);
+      return { ...prev, models: newModels };
+    });
+  };
+
+  if (loading) {
+    return <div className="flex items-center justify-center h-full">加载中...</div>;
+  }
+
+  return (
+    <div className="max-w-6xl mx-auto p-6 animate-in fade-in duration-500">
+      <div className="flex items-center justify-between mb-8">
+        <div className="flex items-center gap-4">
+          <button 
+            onClick={onBack}
+            className="p-2 glass-panel-hover rounded-full transition-colors"
+          >
+            <ArrowLeft size={24} className="text-slate-300" />
+          </button>
+          <div>
+            <h1 className="text-3xl font-bold text-slate-100 flex items-center gap-3">
+              <Box className="text-amber-400" size={32} />
+              评测物料构建器
+            </h1>
+            <p className="text-slate-300 mt-2">将评测集和模板组合，创建评测物料。</p>
+          </div>
+        </div>
+        {!isCreating && (
+          <button 
+            onClick={() => setIsCreating(true)}
+            className="flex items-center gap-2 bg-amber-500 hover:bg-amber-600 text-white px-4 py-2 rounded-xl font-medium transition-colors"
+          >
+            <Plus size={18} /> 新建评测物料
+          </button>
+        )}
+      </div>
+
+      {error && (
+        <div className="mb-6 p-4 bg-rose-500/10 text-red-700 rounded-xl border border-red-200">
+          {error}
+        </div>
+      )}
+
+      {successMessage && (
+        <div className="mb-6 p-4 bg-emerald-500/10 text-emerald-700 rounded-xl border border-emerald-200 flex items-center gap-2">
+          <CheckCircle2 size={18} />
+          {successMessage}
+        </div>
+      )}
+
+      {isCreating && (
+        <div className="bg-white/5 rounded-2xl border border-white/10 shadow-md shadow-black/20 p-6 mb-8">
+          <h2 className="text-xl font-bold text-slate-100 mb-6">创建新物料</h2>
+          
+          {!showPreview ? (
+            <div className="space-y-6">
+              <div>
+                <label className="block text-sm font-medium text-slate-200 mb-2">物料名称</label>
+                <input 
+                  type="text" 
+                  value={newTask.name}
+                  onChange={(e) => setNewTask({...newTask, name: e.target.value})}
+                  className="w-full px-4 py-2 glass-input rounded-xl focus:ring-2 focus:ring-amber-500 focus:border-amber-500"
+                  placeholder="例如：V2.5 视觉能力评测物料"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div>
+                  <label className="block text-sm font-medium text-slate-200 mb-2 flex items-center gap-2">
+                    <Database size={16} className="text-blue-500" /> 选择评测集或上传CSV
+                  </label>
+                  <div className="space-y-3">
+                    <select
+                      value={newTask.datasetId}
+                      onChange={(e) => {
+                        const dsId = e.target.value;
+                        setNewTask({...newTask, datasetId: dsId});
+                        if (dsId) {
+                          setCsvData([]);
+                          const ds = datasets.find(d => d.id === dsId);
+                          if (ds && ds.items && ds.items.length > 0) {
+                            const headers = Object.keys(ds.items[0]);
+                            setCsvHeaders(headers);
+                            
+                            // Auto-detect prompt column
+                            const promptCol = headers.find(h => h.toLowerCase().includes('prompt') || h.includes('提示词') || h.includes('输入'));
+                            if (promptCol) setInputColumns([promptCol]);
+                            else setInputColumns([headers[0]]);
+
+                            // Auto-detect model columns
+                            const models = headers.filter(h => h !== promptCol && !h.toLowerCase().includes('id') && !h.includes('结果'));
+                            setModelColumns(models.slice(0, 2)); // Default to first 2
+                          } else {
+                            setCsvHeaders([]);
+                          }
+                        } else {
+                          setCsvHeaders([]);
+                        }
+                      }}
+                      className="w-full px-4 py-2 glass-input rounded-xl focus:ring-2 focus:ring-amber-500 focus:border-amber-500"
+                      disabled={csvData.length > 0}
+                    >
+                      <option value="">-- 请选择评测集 --</option>
+                      {datasets.map(ds => (
+                        <option key={ds.id} value={ds.id}>{ds.name} ({ds.items?.length || 0} 条数据)</option>
+                      ))}
+                    </select>
+                    
+              <div className="glass-panel rounded-xl p-6 border-dashed border-2 border-white/10">
+                <div className="flex flex-col items-center justify-center py-4">
+                  {!isPasting ? (
+                    <>
+                      <div className="flex items-center gap-4 mb-4">
+                        <label className="flex flex-col items-center justify-center w-48 h-32 border-2 border-dashed border-white/20 rounded-2xl cursor-pointer hover:border-amber-500/50 hover:bg-white/5 transition-all group">
+                          <Upload className="w-8 h-8 text-slate-400 group-hover:text-amber-400 mb-2" />
+                          <span className="text-xs text-slate-400 group-hover:text-slate-200">上传 CSV 文件</span>
+                          <input 
+                            type="file" 
+                            className="hidden" 
+                            accept=".csv,.tsv,.txt" 
+                            onChange={(e) => {
+                              handleFileUpload(e);
+                              setNewTask({...newTask, datasetId: ''});
+                            }} 
+                          />
+                        </label>
+                        
+                        <div className="text-slate-500 font-medium">或</div>
+
+                        <button 
+                          onClick={() => setIsPasting(true)}
+                          className="flex flex-col items-center justify-center w-48 h-32 border-2 border-dashed border-white/20 rounded-2xl cursor-pointer hover:border-blue-500/50 hover:bg-white/5 transition-all group"
+                        >
+                          <ClipboardList className="w-8 h-8 text-slate-400 group-hover:text-blue-400 mb-2" />
+                          <span className="text-xs text-slate-400 group-hover:text-slate-200">粘贴表格内容</span>
+                        </button>
+                      </div>
+                      <p className="text-xs text-slate-400 text-center">
+                        支持 .csv, .tsv 格式。如果从 Excel/飞书复制，建议使用“粘贴”功能。
+                      </p>
+                    </>
+                  ) : (
+                    <div className="w-full space-y-4 animate-in fade-in slide-in-from-top-2 duration-300">
+                      <div className="flex items-center justify-between">
+                        <h4 className="text-sm font-medium text-slate-200">粘贴表格内容 (包含表头)</h4>
+                        <button onClick={() => setIsPasting(false)} className="text-xs text-slate-400 hover:text-white">返回上传</button>
+                      </div>
+                      <textarea 
+                        value={pastedText}
+                        onChange={(e) => setPastedText(e.target.value)}
+                        className="w-full h-48 px-4 py-3 glass-input rounded-xl focus:ring-2 focus:ring-blue-500 font-mono text-xs"
+                        placeholder="在此粘贴从 Excel 或飞书表格复制的内容..."
+                      />
+                      <div className="flex justify-end">
+                        <button 
+                          onClick={() => {
+                            handlePasteSubmit();
+                            setNewTask({...newTask, datasetId: ''});
+                          }}
+                          disabled={!pastedText.trim()}
+                          className="px-6 py-2 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium"
+                        >
+                          解析粘贴内容
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-slate-200 mb-2 flex items-center gap-2">
+                    <LayoutTemplate size={16} className="text-purple-500" /> 选择评测模板
+                  </label>
+                  <select
+                    value={newTask.templateId}
+                    onChange={(e) => {
+                      if (e.target.value === 'CREATE_NEW') {
+                        setShowCreateTemplateModal(true);
+                      } else {
+                        setNewTask({...newTask, templateId: e.target.value});
+                      }
+                    }}
+                    className="w-full px-4 py-2 glass-input rounded-xl focus:ring-2 focus:ring-amber-500 focus:border-amber-500"
+                  >
+                    <option value="">-- 请选择模板 --</option>
+                    {templates.map(tpl => (
+                      <option key={tpl.id} value={tpl.id}>{tpl.name} ({tpl.paradigm})</option>
+                    ))}
+                    <option value="CREATE_NEW" className="font-medium text-amber-400">+ 新建评测模板</option>
+                  </select>
+                </div>
+              </div>
+
+              {(csvData.length > 0 || newTask.datasetId) && csvHeaders.length > 0 && (
+                <div className="bg-white/5 p-4 rounded-xl border border-white/10 space-y-4">
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="block text-sm font-medium text-slate-200">数据字段映射</label>
+                    <div className="text-[10px] text-slate-400 bg-white/5 px-2 py-0.5 rounded border border-white/10">
+                      检测到 {csvHeaders.length} 个字段
+                    </div>
+                  </div>
+                  
+                  <div className="mb-4">
+                    <label className="block text-sm font-medium text-slate-200 mb-2">输入数据类型</label>
+                    <select
+                      value={inputType}
+                      onChange={(e) => setInputType(e.target.value as any)}
+                      className="w-full px-4 py-2 glass-input rounded-xl focus:ring-2 focus:ring-amber-500 focus:border-amber-500"
+                    >
+                      <option value="text">纯文本 (单轮提示词)</option>
+                      <option value="text_image">图文混合 (提示词 + 图片)</option>
+                      <option value="text_audio">音文混合 (提示词 + 音频)</option>
+                      <option value="multi_turn">多轮对话</option>
+                      <option value="other">其他灵活输入</option>
+                    </select>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium text-slate-200 mb-1">输入列 (可多选，如提示词、图片、音频等)</label>
+                      <div className="flex flex-wrap gap-2">
+                        {csvHeaders.map(h => (
+                          <label key={h} className="inline-flex items-center gap-1.5 bg-white/5 px-2 py-1 border border-white/10 rounded-md text-sm cursor-pointer glass-panel-hover">
+                            <input 
+                              type="checkbox" 
+                              checked={inputColumns.includes(h)}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setInputColumns([...inputColumns, h]);
+                                  setModelColumns(modelColumns.filter(c => c !== h));
+                                } else {
+                                  setInputColumns(inputColumns.filter(c => c !== h));
+                                }
+                              }}
+                              className="rounded text-amber-400 focus:ring-amber-500"
+                            />
+                            {h}
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-slate-200 mb-1">模型结果列 (可多选)</label>
+                      <div className="flex flex-wrap gap-2">
+                        {csvHeaders.filter(h => !inputColumns.includes(h)).map(h => (
+                          <label key={h} className="inline-flex items-center gap-1.5 bg-white/5 px-2 py-1 border border-white/10 rounded-md text-sm cursor-pointer glass-panel-hover">
+                            <input 
+                              type="checkbox" 
+                              checked={modelColumns.includes(h)}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setModelColumns([...modelColumns, h]);
+                                } else {
+                                  setModelColumns(modelColumns.filter(c => c !== h));
+                                }
+                              }}
+                              className="rounded text-amber-400 focus:ring-amber-500"
+                            />
+                            <span className="truncate max-w-[120px]" title={h}>{h}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                  
+                  {csvData.length > 0 && (
+                    <div className="pt-2 border-t border-white/10">
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <input 
+                          type="checkbox" 
+                          checked={saveDatasetToPlatform}
+                          onChange={(e) => setSaveDatasetToPlatform(e.target.checked)}
+                          className="rounded text-amber-400 focus:ring-amber-500"
+                        />
+                        <span className="text-sm text-slate-200">将此评测集保存到平台仓库 (仅保存输入列，方便后续复用)</span>
+                      </label>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div>
+                <label className="block text-sm font-medium text-slate-200 mb-2">输出结果类型</label>
+                <select
+                  value={newTask.outputType}
+                  onChange={(e) => setNewTask({...newTask, outputType: e.target.value as any})}
+                  className="w-full px-4 py-2 glass-input rounded-xl focus:ring-2 focus:ring-amber-500 focus:border-amber-500"
+                >
+                  <option value="text">纯文本 (Text)</option>
+                  <option value="image">图像 (Image)</option>
+                  <option value="video">视频 (Video)</option>
+                  <option value="markdown">Markdown</option>
+                </select>
+              </div>
+
+              {csvData.length === 0 && (
+                <div>
+                  <label className="block text-sm font-medium text-slate-200 mb-2 flex items-center gap-2">
+                    <LinkIcon size={16} className="text-slate-300" /> 外部生成结果链接 (可选)
+                  </label>
+                  <input 
+                      type="text" 
+                      value={newTask.externalResultsLink || ''}
+                      onChange={(e) => setNewTask({...newTask, externalResultsLink: e.target.value})}
+                      className="w-full px-4 py-2 glass-input rounded-xl focus:ring-2 focus:ring-amber-500 focus:border-amber-500"
+                      placeholder="例如：飞书表格、云盘文件夹链接等，用于存放外部批量生成的结果"
+                    />
+                    <p className="text-xs text-slate-300 mt-2">
+                      对于生图、生视频等重度生成任务，建议在外部完成批量生成后，将结果链接粘贴于此。
+                    </p>
+                  </div>
+              )}
+
+              <div>
+                <label className="block text-sm font-medium text-slate-200 mb-2 flex items-center gap-2">
+                  <Users size={16} className="text-blue-500" /> 评测负责人 (可选)
+                </label>
+                <div className="flex flex-wrap gap-3">
+                  {users.map(user => {
+                    const isSelected = newTask.assignees?.includes(user.email);
+                    return (
+                      <label 
+                        key={user.uid} 
+                        className={`flex items-center gap-2 px-3 py-2 rounded-xl border cursor-pointer transition-colors ${isSelected ? 'bg-amber-500/20 border-amber-500/50 text-amber-400' : 'bg-white/5 border-white/10 text-slate-300 glass-panel-hover'}`}
+                      >
+                        <input 
+                          type="checkbox" 
+                          className="hidden"
+                          checked={isSelected}
+                          onChange={(e) => {
+                            let newAssignees = [...(newTask.assignees || [])];
+                            if (e.target.checked) {
+                              newAssignees.push(user.email);
+                            } else {
+                              newAssignees = newAssignees.filter(email => email !== user.email);
+                            }
+                            setNewTask({...newTask, assignees: newAssignees});
+                          }}
+                        />
+                        <div className="w-6 h-6 rounded-full bg-white/10 flex items-center justify-center text-xs text-white">
+                          {user.displayName?.charAt(0).toUpperCase() || user.email.charAt(0).toUpperCase()}
+                        </div>
+                        <span className="text-sm">{user.displayName || user.email}</span>
+                      </label>
+                    );
+                  })}
+                  {users.length === 0 && <span className="text-slate-400 text-sm">暂无可选用户，请先让用户登录系统。</span>}
+                </div>
+              </div>
+
+              {csvData.length === 0 && (
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="block text-sm font-medium text-slate-200">参评模型</label>
+                    <button 
+                      onClick={addModel}
+                      className="text-sm text-amber-400 hover:text-amber-300 flex items-center gap-1"
+                    >
+                      <Plus size={14} /> 添加模型
+                    </button>
+                  </div>
+                  <div className="space-y-3">
+                    {newTask.models?.map((model, index) => (
+                      <div key={model.id} className="flex items-center gap-3">
+                        <div className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center text-sm font-medium text-slate-300">
+                          {String.fromCharCode(65 + index)}
+                        </div>
+                        <input 
+                          type="text" 
+                          value={model.name}
+                          onChange={(e) => updateModelName(index, e.target.value)}
+                          className="flex-1 px-4 py-2 glass-input rounded-xl focus:ring-2 focus:ring-amber-500 focus:border-amber-500"
+                          placeholder={`Model ${String.fromCharCode(65 + index)} Name`}
+                        />
+                        {newTask.models!.length > 2 && (
+                          <button 
+                            onClick={() => removeModel(index)}
+                            className="p-2 text-slate-300 hover:text-red-500 transition-colors"
+                          >
+                            <Trash2 size={18} />
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="flex justify-end gap-3 pt-4 border-t border-white/10">
+                <button 
+                  onClick={() => setIsCreating(false)}
+                  className="px-6 py-2 border border-white/10 text-slate-300 rounded-xl glass-panel-hover transition-colors"
+                >
+                  取消
+                </button>
+                {csvData.length > 0 ? (
+                  <button 
+                    onClick={() => {
+                      const err = validateSetup();
+                      if (err) setError(err);
+                      else setShowPreview(true);
+                    }}
+                    className="px-6 py-2 bg-amber-500 text-white rounded-xl hover:bg-amber-600 transition-colors flex items-center gap-2"
+                  >
+                    预览物料
+                  </button>
+                ) : (
+                  <button 
+                    onClick={handleCreateTask}
+                    className="px-6 py-2 bg-amber-500 text-white rounded-xl hover:bg-amber-600 transition-colors flex items-center gap-2"
+                  >
+                    <Save size={18} /> 保存物料
+                  </button>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-6 animate-in fade-in duration-300">
+              <div className="glass-panel rounded-xl p-6">
+                <h3 className="text-lg font-bold text-slate-200 mb-4 flex items-center gap-2">
+                  <LayoutTemplate size={20} className="text-indigo-500" /> 评测物料预览 (第一条数据)
+                </h3>
+                
+                <div className="glass-panel rounded-2xl overflow-hidden shadow-md shadow-black/20 flex flex-col" style={{ minHeight: '400px' }}>
+                  {/* Header/Prompt Area */}
+                  <div className="bg-white/5 border-b border-white/10 px-6 py-4 shrink-0 shadow-md shadow-black/20 z-10 space-y-3">
+                    {inputColumns.map(col => (
+                      <div key={col} className="text-slate-200 text-sm leading-relaxed flex items-start">
+                        <span className="font-semibold text-slate-100 mr-2 select-none uppercase text-xs tracking-wider bg-white/10 px-1.5 py-0.5 rounded shrink-0 mt-0.5">{col}</span>
+                        <div className="break-words whitespace-pre-wrap">{csvData[0][col]}</div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Content Area */}
+                  <div className="flex-1 p-4 md:p-6 flex gap-4 md:gap-6 bg-white/5 overflow-hidden">
+                    {modelColumns.map((col, idx) => (
+                      <div key={col} className="flex-1 flex flex-col min-h-0 bg-white/5 rounded-2xl shadow-md shadow-black/20 border border-white/10 overflow-hidden">
+                        <div className="flex-1 relative min-h-0 p-1 bg-black/40">
+                          {newTask.outputType === 'text' || newTask.outputType === 'markdown' ? (
+                            <div className="h-full w-full bg-white/5 p-4 overflow-y-auto text-slate-200 whitespace-pre-wrap text-sm">
+                              {csvData[0][col]}
+                            </div>
+                          ) : (
+                            <MediaRenderer 
+                              url={csvData[0][col]} 
+                              label={`模型 ${idx + 1} (${col})`} 
+                              isActive={true} 
+                              forceType={newTask.outputType}
+                            />
+                          )}
+                        </div>
+                        <div className="p-3 bg-white/5 text-center text-sm font-medium text-slate-300 border-t border-white/10">
+                          模型 {idx + 1} ({col})
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+              
+              <div className="flex justify-end gap-3 pt-4 border-t border-white/10">
+                <button 
+                  onClick={() => setShowPreview(false)}
+                  className="px-6 py-2 border border-white/10 text-slate-300 rounded-xl glass-panel-hover transition-colors"
+                >
+                  返回修改
+                </button>
+                <button 
+                  onClick={handleCreateTask}
+                  disabled={isSubmitting}
+                  className={`px-6 py-2 rounded-xl transition-colors flex items-center gap-2 ${isSubmitting ? 'bg-white/10 text-slate-400 cursor-not-allowed' : 'bg-amber-500 text-white hover:bg-amber-600'}`}
+                >
+                  {isSubmitting ? <Loader2 size={18} className="animate-spin" /> : <CheckCircle2 size={18} />} 
+                  {isSubmitting ? '创建中...' : '确认创建'}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {!isCreating && tasks.length > 0 && (
+        <div className="mb-6">
+          <h2 className="text-xl font-bold text-slate-100">本项目已创建的评测物料</h2>
+          <p className="text-slate-300 text-sm mt-1">您可以在此管理历史创建的物料，点击“启动”后即可在首页开始评测。</p>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        {tasks.map(task => {
+          const dataset = datasets.find(d => d.id === task.datasetId);
+          const template = templates.find(t => t.id === task.templateId);
+
+          return (
+            <div key={task.id} className="bg-white/5 rounded-2xl border border-white/10 shadow-md shadow-black/20 overflow-hidden flex flex-col">
+              <div className="p-5 border-b border-white/10 flex-1">
+                <div className="flex justify-between items-start mb-3">
+                  <h3 className="font-bold text-lg text-slate-100">{task.name}</h3>
+                  <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${
+                    task.status === 'active' ? 'bg-emerald-500/20 text-emerald-300' : 
+                    task.status === 'completed' ? 'bg-white/10 text-slate-200' : 
+                    'bg-amber-100 text-amber-700'
+                  }`}>
+                    {task.status === 'active' ? '进行中' : task.status === 'completed' ? '已完成' : '草稿'}
+                  </span>
+                </div>
+                
+                <div className="space-y-3 mt-4">
+                  <div className="flex items-start gap-2 text-sm">
+                    <Database size={16} className="text-slate-300 mt-0.5" />
+                    <div>
+                      <span className="text-slate-300">数据集: </span>
+                      <span className="font-medium text-slate-200">{dataset?.name || '未知数据集'}</span>
+                    </div>
+                  </div>
+                  <div className="flex items-start gap-2 text-sm">
+                    <LayoutTemplate size={16} className="text-slate-300 mt-0.5" />
+                    <div>
+                      <span className="text-slate-300">模板: </span>
+                      <span className="font-medium text-slate-200">{template?.name || '未知模板'}</span>
+                    </div>
+                  </div>
+                  <div className="flex items-start gap-2 text-sm">
+                    <Box size={16} className="text-slate-300 mt-0.5" />
+                    <div className="flex-1">
+                      <span className="text-slate-300">模型: </span>
+                      <div className="flex flex-wrap gap-1 mt-1">
+                        {task.models.map((m, idx) => (
+                          <span key={idx} className="px-2 py-0.5 bg-white/10 text-slate-200 rounded text-xs border border-white/10">
+                            {m.name}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                  {task.assignees && task.assignees.length > 0 && (
+                    <div className="flex items-start gap-2 text-sm">
+                      <Users size={16} className="text-slate-300 mt-0.5" />
+                      <div className="flex-1">
+                        <span className="text-slate-300">负责人: </span>
+                        <div className="flex flex-wrap gap-1 mt-1">
+                          {task.assignees.map((email, idx) => {
+                            const user = users.find(u => u.email === email);
+                            return (
+                              <span key={idx} className="px-2 py-0.5 bg-indigo-500/20 text-indigo-300 rounded text-xs border border-indigo-500/30 flex items-center gap-1" title={email}>
+                                <div className="w-3 h-3 rounded-full bg-indigo-500 flex items-center justify-center text-[8px] text-white font-bold">
+                                  {user?.displayName?.charAt(0).toUpperCase() || email.charAt(0).toUpperCase()}
+                                </div>
+                                {user?.displayName || email.split('@')[0]}
+                              </span>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  {task.externalResultsLink && (
+                    <div className="flex items-start gap-2 text-sm">
+                      <LinkIcon size={16} className="text-slate-300 mt-0.5" />
+                      <div className="flex-1 truncate">
+                        <span className="text-slate-300">生成结果: </span>
+                        <a 
+                          href={task.externalResultsLink.startsWith('http') ? task.externalResultsLink : `https://${task.externalResultsLink}`} 
+                          target="_blank" 
+                          rel="noopener noreferrer"
+                          className="font-medium text-amber-400 hover:underline"
+                          title={task.externalResultsLink}
+                        >
+                          外部链接
+                        </a>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+              
+              <div className="bg-white/5 p-4 flex items-center justify-between">
+                <div className="text-xs text-slate-300">
+                  创建于 {new Date(task.createdAt).toLocaleDateString()}
+                </div>
+                <div className="flex items-center gap-2">
+                  {task.status === 'draft' && (
+                    <button 
+                      onClick={() => handleUpdateTaskStatus(task.id, 'active')}
+                      className="flex items-center gap-1 px-3 py-1.5 text-sm font-medium text-emerald-300 bg-emerald-500/20 hover:bg-green-200 rounded-lg transition-colors"
+                      title="启动物料"
+                    >
+                      <Play size={14} /> 启动
+                    </button>
+                  )}
+                  {task.status === 'active' && (
+                    <button 
+                      onClick={() => handleUpdateTaskStatus(task.id, 'completed')}
+                      className="flex items-center gap-1 px-3 py-1.5 text-sm font-medium text-blue-700 bg-blue-100 hover:bg-blue-200 rounded-lg transition-colors"
+                      title="标记为完成"
+                    >
+                      <CheckCircle2 size={14} /> 标记完成
+                    </button>
+                  )}
+                  <button 
+                    onClick={() => handleViewTask(task)}
+                    className="flex items-center gap-1 px-3 py-1.5 text-sm font-medium text-slate-300 hover:text-amber-300 hover:bg-amber-500/10 rounded-lg transition-colors"
+                    title="查看详情"
+                  >
+                    <Eye size={14} /> 查看 / 编辑
+                  </button>
+                  <button 
+                    onClick={() => handleDeleteTask(task.id)}
+                    className="flex items-center gap-1 px-3 py-1.5 text-sm font-medium text-slate-300 hover:text-red-700 hover:bg-rose-500/10 rounded-lg transition-colors"
+                    title="删除"
+                  >
+                    <Trash2 size={14} /> 删除
+                  </button>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+
+        {tasks.length === 0 && !isCreating && (
+          <div className="col-span-full py-12 text-center bg-white/5 rounded-2xl border border-white/10 border-dashed">
+            <Box size={48} className="mx-auto text-slate-300 mb-4" />
+            <h3 className="text-lg font-medium text-slate-100 mb-2">暂无评测物料</h3>
+            <p className="text-slate-300 mb-6">创建一个新物料，将数据集和评测模板组合起来。</p>
+            <button 
+              onClick={() => setIsCreating(true)}
+              className="inline-flex items-center gap-2 bg-amber-500 hover:bg-amber-600 text-white px-4 py-2 rounded-xl font-medium transition-colors"
+            >
+              <Plus size={18} /> 新建评测物料
+            </button>
+          </div>
+        )}
+      </div>
+      {showCreateTemplateModal && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white/5 rounded-2xl shadow-xl w-full max-w-md overflow-hidden animate-in zoom-in-95 duration-200">
+            <div className="flex items-center justify-between p-6 border-b border-white/10">
+              <h3 className="text-xl font-bold text-slate-200">新建评测模板</h3>
+              <button 
+                onClick={() => setShowCreateTemplateModal(false)}
+                className="text-slate-300 hover:text-slate-300 transition-colors"
+              >
+                <X size={24} />
+              </button>
+            </div>
+            <div className="p-6 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-slate-200 mb-1">模板名称</label>
+                <input 
+                  type="text" 
+                  value={newTemplateName}
+                  onChange={(e) => setNewTemplateName(e.target.value)}
+                  className="w-full px-4 py-2 glass-input rounded-xl focus:ring-2 focus:ring-amber-500 focus:border-amber-500"
+                  placeholder="例如：文生图 GSB 评测"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-200 mb-1">评测范式</label>
+                <select 
+                  value={newTemplateParadigm}
+                  onChange={(e) => setNewTemplateParadigm(e.target.value as 'GSB' | 'MOS' | 'Arena')}
+                  className="w-full px-4 py-2 glass-input rounded-xl focus:ring-2 focus:ring-amber-500 focus:border-amber-500"
+                >
+                  <option value="GSB">GSB (Good/Same/Bad) - A/B对比</option>
+                  <option value="MOS">MOS (1-5分) - 单项打分</option>
+                  <option value="Arena">Arena - 盲测排位</option>
+                </select>
+                <p className="text-xs text-slate-300 mt-2">
+                  系统会自动为您生成默认的打分维度。如需自定义更多维度，请前往“评测模板仓库”。
+                </p>
+              </div>
+            </div>
+            <div className="p-6 bg-white/5 border-t border-white/10 flex justify-end gap-3">
+              <button 
+                onClick={() => setShowCreateTemplateModal(false)}
+                className="px-4 py-2 text-slate-300 glass-panel-hover rounded-xl transition-colors font-medium"
+              >
+                取消
+              </button>
+              <button 
+                onClick={handleQuickCreateTemplate}
+                disabled={!newTemplateName.trim()}
+                className="px-4 py-2 bg-amber-500 text-white rounded-xl hover:bg-amber-600 transition-colors font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                创建并使用
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <ConfirmModal
+        isOpen={!!taskToDelete}
+        title="删除评测物料"
+        message="确定要删除这个评测物料吗？此操作不可恢复，相关的评测数据也可能丢失。"
+        onConfirm={confirmDeleteTask}
+        onCancel={() => setTaskToDelete(null)}
+        confirmText="删除"
+      />
+
+      {viewingTask && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white/5 rounded-2xl shadow-xl w-full max-w-4xl max-h-[90vh] overflow-hidden flex flex-col animate-in zoom-in-95 duration-200">
+            <div className="flex items-center justify-between p-6 border-b border-white/10">
+              <h3 className="text-xl font-bold text-slate-200 flex items-center gap-2">
+                <Eye size={20} className="text-amber-400" />
+                物料详情: {viewingTask.name}
+              </h3>
+              <button 
+                onClick={() => setViewingTask(null)}
+                className="text-slate-300 hover:text-slate-300 transition-colors"
+              >
+                <X size={24} />
+              </button>
+            </div>
+            
+            <div className="p-6 overflow-y-auto flex-1 bg-white/5 space-y-6">
+              {/* Task Level Editing */}
+              <div className="bg-white/5 p-6 rounded-xl border border-white/10 shadow-md shadow-black/20 space-y-4">
+                <h4 className="font-semibold text-slate-200 border-b border-white/10 pb-2">基本信息</h4>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-slate-200 mb-1">物料名称</label>
+                    <input 
+                      type="text" 
+                      value={viewingTask.name}
+                      onChange={async (e) => {
+                        const newName = e.target.value;
+                        setViewingTask({...viewingTask, name: newName});
+                        try {
+                          await updateDoc(doc(db, 'evalTasks', viewingTask.id), { name: newName });
+                        } catch (err) {
+                          console.error("Error updating task name:", err);
+                        }
+                      }}
+                      className="w-full px-3 py-2 glass-input rounded-lg focus:ring-2 focus:ring-amber-500 focus:border-amber-500 text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-200 mb-1 flex items-center gap-2">
+                      <Users size={14} className="text-blue-500" /> 评测负责人 (可选)
+                    </label>
+                    <div className="flex flex-wrap gap-2">
+                      {users.map(user => {
+                        const isSelected = viewingTask.assignees?.includes(user.email);
+                        return (
+                          <label 
+                            key={user.uid} 
+                            className={`flex items-center gap-1.5 px-2 py-1.5 rounded-lg border cursor-pointer transition-colors ${isSelected ? 'bg-amber-500/20 border-amber-500/50 text-amber-400' : 'bg-white/5 border-white/10 text-slate-300 glass-panel-hover'}`}
+                          >
+                            <input 
+                              type="checkbox" 
+                              className="hidden"
+                              checked={isSelected}
+                              onChange={async (e) => {
+                                let newAssignees = [...(viewingTask.assignees || [])];
+                                if (e.target.checked) {
+                                  newAssignees.push(user.email);
+                                } else {
+                                  newAssignees = newAssignees.filter(email => email !== user.email);
+                                }
+                                setViewingTask({...viewingTask, assignees: newAssignees});
+                                try {
+                                  await updateDoc(doc(db, 'evalTasks', viewingTask.id), { assignees: newAssignees });
+                                } catch (err) {
+                                  console.error("Error updating task assignees:", err);
+                                }
+                              }}
+                            />
+                            <div className="w-5 h-5 rounded-full bg-white/10 flex items-center justify-center text-[10px] text-white">
+                              {user.displayName?.charAt(0).toUpperCase() || user.email.charAt(0).toUpperCase()}
+                            </div>
+                            <span className="text-xs">{user.displayName || user.email}</span>
+                          </label>
+                        );
+                      })}
+                      {users.length === 0 && <span className="text-slate-400 text-xs">暂无可选用户</span>}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Items List */}
+              <div className="space-y-4">
+                <h4 className="font-semibold text-slate-200">评测数据项</h4>
+                {loadingItems ? (
+                  <div className="flex items-center justify-center py-12 bg-white/5 rounded-xl border border-white/10">
+                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600"></div>
+                    <span className="ml-3 text-slate-300">加载中...</span>
+                  </div>
+                ) : viewingTaskItems.length === 0 ? (
+                  <div className="text-center py-12 text-slate-300 bg-white/5 rounded-xl border border-white/10">
+                    没有找到评测数据
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    <div className="flex justify-between items-center mb-2">
+                      <span className="text-sm font-medium text-slate-300">共 {viewingTaskItems.length} 条数据</span>
+                    </div>
+                    {viewingTaskItems.map((item, idx) => {
+                      const isEditing = editingItemId === item.id;
+                      return (
+                    <div key={item.id || idx} className="bg-white/5 p-4 rounded-xl border border-white/10 shadow-md shadow-black/20">
+                      <div className="flex justify-between items-center mb-2 border-b border-white/10 pb-2">
+                        <div className="font-medium text-slate-200">
+                          数据项 {idx + 1}
+                        </div>
+                        {isEditing ? (
+                          <div className="flex gap-2">
+                            <button onClick={() => setEditingItemId(null)} className="text-slate-300 hover:text-slate-200 text-sm">取消</button>
+                            <button onClick={() => handleSaveItemEdit(item.id)} className="text-amber-400 hover:text-amber-300 text-sm font-medium">保存</button>
+                          </div>
+                        ) : (
+                          <button onClick={() => {
+                            setEditingItemId(item.id);
+                            setEditItemForm({
+                              prompt: item.prompt || '',
+                              modelA_Url: item.modelA_Url || '',
+                              modelB_Url: item.modelB_Url || '',
+                              expectedOutput: item.expectedOutput || ''
+                            });
+                          }} className="text-amber-400 hover:text-amber-300 text-sm flex items-center gap-1">
+                            <Edit size={14} /> 编辑内容
+                          </button>
+                        )}
+                      </div>
+                      
+                      {/* Input */}
+                      <div className="mb-4">
+                        <div className="text-xs font-medium text-slate-300 uppercase tracking-wider mb-1">输入</div>
+                        {isEditing ? (
+                          <textarea 
+                            className="w-full p-3 glass-input rounded-lg text-sm font-mono"
+                            rows={4}
+                            value={editItemForm.prompt}
+                            onChange={(e) => setEditItemForm({...editItemForm, prompt: e.target.value})}
+                          />
+                        ) : (
+                          <div className="bg-white/5 p-3 rounded-lg text-sm text-slate-200 whitespace-pre-wrap font-mono">
+                            {item.prompt || Object.entries(item.inputs || {}).map(([k, v]) => `[${k}]: ${v}`).join('\n')}
+                          </div>
+                        )}
+                      </div>
+                      
+                      {/* Expected Output */}
+                      {(item.expectedOutput || isEditing) && (
+                        <div className="mb-4">
+                          <div className="text-xs font-medium text-slate-300 uppercase tracking-wider mb-1">预期输出</div>
+                          {isEditing ? (
+                            <textarea 
+                              className="w-full p-3 glass-input rounded-lg text-sm font-mono"
+                              rows={3}
+                              value={editItemForm.expectedOutput}
+                              onChange={(e) => setEditItemForm({...editItemForm, expectedOutput: e.target.value})}
+                            />
+                          ) : (
+                            <div className="bg-emerald-500/10 p-3 rounded-lg text-sm text-emerald-400 whitespace-pre-wrap font-mono">
+                              {item.expectedOutput}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      
+                      {/* Models Output */}
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {viewingTask.models.map((model, mIdx) => {
+                          const outputKey = mIdx === 0 ? 'modelA_Url' : 'modelB_Url';
+                          const outputValue = isEditing ? editItemForm[outputKey] : (mIdx === 0 ? item.modelA_Url : item.modelB_Url);
+                          return (
+                            <div key={model.id} className="border border-white/10 rounded-lg overflow-hidden">
+                              <div className="bg-white/5 px-3 py-2 text-xs font-medium text-slate-300 border-b border-white/10">
+                                {model.name}
+                              </div>
+                              {isEditing ? (
+                                <textarea 
+                                  className="w-full p-3 border-0 text-sm font-mono focus:ring-0"
+                                  rows={6}
+                                  value={outputValue}
+                                  onChange={(e) => setEditItemForm({...editItemForm, [outputKey]: e.target.value})}
+                                />
+                              ) : (
+                                <div className="p-3 text-sm text-slate-200 whitespace-pre-wrap font-mono bg-white/5">
+                                  {outputValue || <span className="text-slate-300 italic">无输出</span>}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  )}
+</div>
+);
+}

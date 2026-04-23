@@ -1,0 +1,176 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Global Safety Net
+    // ===============================================================
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ===============================================================
+    // Primitives & Helpers
+    // ===============================================================
+    function isValidId(id) { 
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); 
+    }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+    function isSignedIn() { return request.auth != null; }
+    function isVerifiedUser() { return isSignedIn() && request.auth.token.email_verified == true; }
+    
+    // Admin check: either in admins collection or a hardcoded bootstrap admin
+    function isAdmin() { 
+      return isSignedIn() && (
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        (request.auth.token.email == "luxueying645@gmail.com" && request.auth.token.email_verified == true)
+      ); 
+    }
+
+    // ===============================================================
+    // Entity Validations
+    // ===============================================================
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'email', 'role']) && 
+             data.keys().size() == 4 && // uid, email, role, displayName
+             data.uid == request.auth.uid &&
+             data.email is string &&
+             data.role in ['user', 'admin'];
+    }
+
+    function isValidProject(data) {
+      return data.keys().hasAll(['name', 'initiatorUid', 'createdAt', 'lastUpdated']) &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
+             data.initiatorUid == request.auth.uid &&
+             data.createdAt == request.time &&
+             data.lastUpdated == request.time;
+    }
+
+    function isValidDataset(data) {
+      return data.keys().hasAll(['name', 'creatorUid', 'createdAt', 'updatedAt']) &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
+             data.creatorUid == request.auth.uid &&
+             data.createdAt == request.time &&
+             data.updatedAt == request.time;
+    }
+
+    function isValidTemplate(data) {
+      return data.keys().hasAll(['name', 'paradigm', 'creatorUid', 'createdAt']) &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
+             data.paradigm in ['GSB', 'MOS', 'Arena'] &&
+             data.creatorUid == request.auth.uid &&
+             data.createdAt == request.time;
+    }
+
+    function isValidTask(data) {
+      return data.keys().hasAll(['name', 'datasetId', 'templateId', 'status', 'creatorUid', 'createdAt']) &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
+             data.datasetId is string &&
+             data.templateId is string &&
+             data.status in ['draft', 'active', 'completed'] &&
+             data.creatorUid == request.auth.uid &&
+             data.createdAt == request.time;
+    }
+
+    function isValidVote(data) {
+      return data.keys().hasAll(['itemId', 'vote', 'userUid', 'timestamp']) &&
+             data.itemId is string &&
+             data.vote is string &&
+             data.userUid == request.auth.uid &&
+             data.timestamp == request.time;
+    }
+
+    // ===============================================================
+    // Match Blocks
+    // ===============================================================
+
+    match /users/{userId} {
+      allow get: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isVerifiedUser() && userId == request.auth.uid && isValidUser(incoming()) && incoming().role == 'user';
+      allow update: if isVerifiedUser() && userId == request.auth.uid && 
+                    incoming().diff(existing()).affectedKeys().hasOnly(['displayName']) &&
+                    incoming().displayName is string && incoming().displayName.size() <= 50;
+    }
+
+    match /projects/{projectId} {
+      allow get: if isSignedIn();
+      allow list: if isSignedIn();
+      allow create: if isVerifiedUser() && isValidId(projectId) && isValidProject(incoming());
+      allow update: if isVerifiedUser() && (
+        isAdmin() || (
+          existing().initiatorUid == request.auth.uid &&
+          incoming().initiatorUid == existing().initiatorUid &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().lastUpdated == request.time &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['name', 'category', 'priority', 'type', 'goal', 'cycle', 'support', 'progress', 'steps', 'datasetIds', 'dimensions', 'lastUpdated'])
+        )
+      );
+      allow delete: if isAdmin() || (isVerifiedUser() && existing().initiatorUid == request.auth.uid);
+    }
+
+    match /evalDatasets/{datasetId} {
+      allow get: if isSignedIn();
+      allow list: if isSignedIn();
+      allow create: if isVerifiedUser() && isValidId(datasetId) && isValidDataset(incoming());
+      allow update: if isVerifiedUser() && (
+        isAdmin() || (
+          existing().creatorUid == request.auth.uid &&
+          incoming().creatorUid == existing().creatorUid &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['name', 'description', 'tags', 'inputSchema', 'items', 'updatedAt'])
+        )
+      );
+      allow delete: if isAdmin() || (isVerifiedUser() && existing().creatorUid == request.auth.uid);
+    }
+
+    match /evalTemplates/{templateId} {
+      allow get: if isSignedIn();
+      allow list: if isSignedIn();
+      allow create: if isVerifiedUser() && isValidId(templateId) && isValidTemplate(incoming());
+      allow update: if isVerifiedUser() && (
+        isAdmin() || (
+          existing().creatorUid == request.auth.uid &&
+          incoming().creatorUid == existing().creatorUid &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['name', 'description', 'paradigm', 'dimensions'])
+        )
+      );
+      allow delete: if isAdmin() || (isVerifiedUser() && existing().creatorUid == request.auth.uid);
+    }
+
+    match /evalTasks/{taskId} {
+      allow get: if isSignedIn();
+      allow list: if isSignedIn();
+      allow create: if isVerifiedUser() && isValidId(taskId) && isValidTask(incoming()) && 
+                    exists(/databases/$(database)/documents/evalDatasets/$(incoming().datasetId)) &&
+                    exists(/databases/$(database)/documents/evalTemplates/$(incoming().templateId));
+      allow update: if isVerifiedUser() && (
+        isAdmin() || (
+          // Creator can update everything except immutable fields
+          existing().creatorUid == request.auth.uid &&
+          incoming().creatorUid == existing().creatorUid &&
+          incoming().createdAt == existing().createdAt &&
+          existing().status != 'completed' && // Locked if completed
+          incoming().diff(existing()).affectedKeys().hasOnly(['name', 'projectId', 'datasetId', 'templateId', 'models', 'outputType', 'status', 'assignees', 'progress'])
+        ) || (
+          // Assignees can update ONLY progress
+          existing().status == 'active' &&
+          request.auth.uid in existing().assignees &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['progress'])
+        )
+      );
+      allow delete: if isAdmin() || (isVerifiedUser() && existing().creatorUid == request.auth.uid);
+
+      match /userVotes/{userUid} {
+        allow get: if isSignedIn();
+        allow create: if isVerifiedUser() && userUid == request.auth.uid && isValidVote(incoming()) &&
+                      get(/databases/$(database)/documents/evalTasks/$(taskId)).data.status == 'active';
+        allow update: if isAdmin(); // Only admins can correct votes later
+        allow delete: if isAdmin();
+      }
+    }
+  }
+}
