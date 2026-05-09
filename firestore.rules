@@ -58,7 +58,7 @@ service cloud.firestore {
     function isValidTemplate(data) {
       return data.keys().hasAll(['name', 'paradigm', 'creatorUid', 'createdAt']) &&
              data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
-             data.paradigm in ['GSB', 'MOS', 'Arena'] &&
+             data.paradigm in ['GSB', 'MOS', 'Arena', 'Arena-rank'] &&
              data.creatorUid == request.auth.uid &&
              data.createdAt == request.time;
     }
@@ -73,12 +73,10 @@ service cloud.firestore {
              data.createdAt == request.time;
     }
 
-    function isValidVote(data) {
-      return data.keys().hasAll(['itemId', 'vote', 'userUid', 'timestamp']) &&
-             data.itemId is string &&
-             data.vote is string &&
-             data.userUid == request.auth.uid &&
-             data.timestamp == request.time;
+    function isValidVoteDocument(data) {
+      return data.keys().hasOnly(['votes']) &&
+             data.votes is list &&
+             data.votes.size() <= 500;
     }
 
     // ===============================================================
@@ -166,9 +164,8 @@ service cloud.firestore {
 
       match /userVotes/{userUid} {
         allow get: if isSignedIn();
-        allow create: if isVerifiedUser() && userUid == request.auth.uid && isValidVote(incoming()) &&
+        allow create, update: if isVerifiedUser() && userUid == request.auth.token.email && isValidVoteDocument(incoming()) &&
                       get(/databases/$(database)/documents/evalTasks/$(taskId)).data.status == 'active';
-        allow update: if isAdmin(); // Only admins can correct votes later
         allow delete: if isAdmin();
       }
     }

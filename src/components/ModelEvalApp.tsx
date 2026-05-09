@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Layers, ChevronRight } from 'lucide-react';
 import SetupScreen from './SetupScreen';
 import VotingScreen from './VotingScreen';
+import ArenaRankVotingScreen from './ArenaRankVotingScreen';
 import ResultsScreen from './ResultsScreen';
 import AnalysisScreen from './AnalysisScreen';
 import HistoryScreen from './HistoryScreen';
@@ -10,7 +11,7 @@ import DatasetRepositoryScreen from './DatasetRepositoryScreen';
 import TemplateRepositoryScreen from './TemplateRepositoryScreen';
 import TaskBuilderScreen from './TaskBuilderScreen';
 import { ConfirmModal } from './ConfirmModal';
-import { AppState, EvaluationItem, HistorySession, VoteRecord, VoteType, EvaluationProject } from '../types';
+import { AppState, EvalParadigm, EvaluationItem, HistorySession, RankingEntry, VoteRecord, VoteType, EvaluationProject } from '../types';
 import { auth } from '../firebase';
 
 const STORAGE_KEY = 'modeleval_session';
@@ -27,6 +28,11 @@ export function ModelEvalApp({ initialRoute = 'dashboard' }: ModelEvalAppProps) 
   const [currentIndex, setCurrentIndex] = useState(0);
   const [userName, setUserName] = useState('');
   const [modelNames, setModelNames] = useState({ a: 'Model A', b: 'Model B' });
+  const [taskModels, setTaskModels] = useState<{ id: string; name: string }[]>([
+    { id: 'model-a', name: 'Model A' },
+    { id: 'model-b', name: 'Model B' }
+  ]);
+  const [taskParadigm, setTaskParadigm] = useState<EvalParadigm>('Arena');
   const [hasSavedSession, setHasSavedSession] = useState(false);
   const [sessionId, setSessionId] = useState<string>('');
   
@@ -83,12 +89,14 @@ export function ModelEvalApp({ initialRoute = 'dashboard' }: ModelEvalAppProps) 
         currentIndex,
         userName,
         modelNames,
+        taskModels,
+        taskParadigm,
         timestamp: Date.now(),
         sessionId // Persist the ID
       };
       localStorage.setItem(STORAGE_KEY, JSON.stringify(sessionData));
     }
-  }, [items, votes, currentIndex, appState, userName, modelNames, sessionId]);
+  }, [items, votes, currentIndex, appState, userName, modelNames, taskModels, taskParadigm, sessionId]);
 
   // Save to History when session is complete (moved to results)
   const saveToHistory = (completedVotes: VoteRecord[]) => {
@@ -99,6 +107,8 @@ export function ModelEvalApp({ initialRoute = 'dashboard' }: ModelEvalAppProps) 
       timestamp: Date.now(),
       userName: userName || 'Anonymous',
       modelNames,
+      models: taskModels,
+      paradigm: taskParadigm,
       items,
       votes: completedVotes
     };
@@ -125,6 +135,8 @@ export function ModelEvalApp({ initialRoute = 'dashboard' }: ModelEvalAppProps) 
         setCurrentIndex(data.currentIndex);
         setUserName(data.userName || '');
         if (data.modelNames) setModelNames(data.modelNames);
+        if (data.taskModels) setTaskModels(data.taskModels);
+        if (data.taskParadigm) setTaskParadigm(data.taskParadigm);
         setSessionId(data.sessionId || `session-${Date.now()}`); // Ensure ID exists
         setAppState('voting');
       } catch (e) {
@@ -145,12 +157,25 @@ export function ModelEvalApp({ initialRoute = 'dashboard' }: ModelEvalAppProps) 
     });
   };
 
-  const handleStart = (parsedItems: EvaluationItem[], name: string, parsedNames?: { a: string, b: string }, taskId?: string, existingVotes?: VoteRecord[]) => {
+  const handleStart = (
+    parsedItems: EvaluationItem[],
+    name: string,
+    parsedNames?: { a: string, b: string },
+    taskId?: string,
+    existingVotes?: VoteRecord[],
+    paradigm: EvalParadigm = 'Arena',
+    models?: { id: string; name: string }[]
+  ) => {
     setItems(parsedItems);
     setUserName(name);
     if (parsedNames) setModelNames(parsedNames);
     else setModelNames({ a: 'Model A', b: 'Model B' });
-    if (taskId) setActiveTaskId(taskId);
+    setTaskModels(models && models.length > 0 ? models : [
+      { id: 'model-a', name: parsedNames?.a || 'Model A' },
+      { id: 'model-b', name: parsedNames?.b || 'Model B' }
+    ]);
+    setTaskParadigm(paradigm);
+    setActiveTaskId(taskId || null);
     
     // Generate unique ID for this session
     setSessionId(`session-${Date.now()}`);
@@ -194,13 +219,21 @@ export function ModelEvalApp({ initialRoute = 'dashboard' }: ModelEvalAppProps) 
         } catch (updateErr) {
           // If progress map doesn't exist, updateDoc with FieldPath might fail.
           // Fallback to setDoc with merge: true
-          await setDoc(taskRef, { progress: { [userName]: currentIndex + 1 } }, { merge: true });
+          try {
+            await setDoc(taskRef, { progress: { [userName]: currentIndex + 1 } }, { merge: true });
+          } catch (progressErr) {
+            console.error("Failed to update task progress", progressErr);
+          }
         }
         
         const voteRef = doc(db, 'evalTasks', activeTaskId, 'userVotes', userName);
-        await setDoc(voteRef, { votes: updatedVotes }, { merge: true });
+        try {
+          await setDoc(voteRef, { votes: updatedVotes }, { merge: true });
+        } catch (voteErr) {
+          console.error("Failed to save vote", voteErr);
+        }
       } catch (e) {
-        console.error("Failed to update task progress", e);
+        console.error("Failed to initialize vote persistence", e);
       }
     }
 
@@ -208,6 +241,53 @@ export function ModelEvalApp({ initialRoute = 'dashboard' }: ModelEvalAppProps) 
       setCurrentIndex(prev => prev + 1);
     } else {
       // Session Complete
+      saveToHistory(updatedVotes);
+      setAppState('results');
+    }
+  };
+
+  const handleRankVote = async (ranking: RankingEntry[]) => {
+    const currentItem = items[currentIndex];
+
+    const newVote: VoteRecord = {
+      itemId: currentItem.id,
+      ranking,
+      timestamp: Date.now(),
+      user: userName
+    };
+
+    const updatedVotes = [...votes, newVote];
+    setVotes(updatedVotes);
+
+    if (activeTaskId && userName) {
+      try {
+        const { doc, updateDoc, FieldPath, setDoc } = await import('firebase/firestore');
+        const { db } = await import('../firebase');
+        const taskRef = doc(db, 'evalTasks', activeTaskId);
+        try {
+          await updateDoc(taskRef, new FieldPath('progress', userName), currentIndex + 1);
+        } catch (updateErr) {
+          try {
+            await setDoc(taskRef, { progress: { [userName]: currentIndex + 1 } }, { merge: true });
+          } catch (progressErr) {
+            console.error("Failed to update task progress", progressErr);
+          }
+        }
+
+        const voteRef = doc(db, 'evalTasks', activeTaskId, 'userVotes', userName);
+        try {
+          await setDoc(voteRef, { votes: updatedVotes }, { merge: true });
+        } catch (voteErr) {
+          console.error("Failed to save ranking vote", voteErr);
+        }
+      } catch (e) {
+        console.error("Failed to initialize ranking persistence", e);
+      }
+    }
+
+    if (currentIndex < items.length - 1) {
+      setCurrentIndex(prev => prev + 1);
+    } else {
       saveToHistory(updatedVotes);
       setAppState('results');
     }
@@ -227,13 +307,21 @@ export function ModelEvalApp({ initialRoute = 'dashboard' }: ModelEvalAppProps) 
           try {
             await updateDoc(taskRef, new FieldPath('progress', userName), currentIndex - 1);
           } catch (updateErr) {
-            await setDoc(taskRef, { progress: { [userName]: currentIndex - 1 } }, { merge: true });
+            try {
+              await setDoc(taskRef, { progress: { [userName]: currentIndex - 1 } }, { merge: true });
+            } catch (progressErr) {
+              console.error("Failed to update task progress on go back", progressErr);
+            }
           }
           
           const voteRef = doc(db, 'evalTasks', activeTaskId, 'userVotes', userName);
-          await setDoc(voteRef, { votes: updatedVotes }, { merge: true });
+          try {
+            await setDoc(voteRef, { votes: updatedVotes }, { merge: true });
+          } catch (voteErr) {
+            console.error("Failed to save reverted votes", voteErr);
+          }
         } catch (e) {
-          console.error("Failed to update task progress on go back", e);
+          console.error("Failed to initialize go back persistence", e);
         }
       }
     }
@@ -250,6 +338,11 @@ export function ModelEvalApp({ initialRoute = 'dashboard' }: ModelEvalAppProps) 
         setVotes([]);
         setCurrentIndex(0);
         setModelNames({ a: 'Model A', b: 'Model B' });
+        setTaskModels([
+          { id: 'model-a', name: 'Model A' },
+          { id: 'model-b', name: 'Model B' }
+        ]);
+        setTaskParadigm('Arena');
         setSessionId('');
         localStorage.removeItem(STORAGE_KEY);
         setHasSavedSession(false);
@@ -301,11 +394,11 @@ export function ModelEvalApp({ initialRoute = 'dashboard' }: ModelEvalAppProps) 
             <DashboardScreen 
               initialProject={activeProject}
               onProjectSelect={setActiveProject}
-              onGoToExecution={(project, taskItems, taskName, modelNames, taskId, existingVotes) => {
+              onGoToExecution={(project, taskItems, taskName, modelNames, taskId, existingVotes, paradigm, models) => {
                 setActiveProject(project);
                 if (taskItems && taskItems.length > 0) {
                   const userName = auth.currentUser?.email || auth.currentUser?.displayName || localStorage.getItem('eval_username') || 'Anonymous';
-                  handleStart(taskItems, userName, modelNames, taskId, existingVotes);
+                  handleStart(taskItems, userName, modelNames, taskId, existingVotes, paradigm, models);
                 } else {
                   setAppState('setup');
                 }
@@ -389,13 +482,27 @@ export function ModelEvalApp({ initialRoute = 'dashboard' }: ModelEvalAppProps) 
           </div>
         )}
 
-        {appState === 'voting' && items.length > 0 && (
+        {appState === 'voting' && items.length > 0 && taskParadigm !== 'Arena-rank' && (
           <VotingScreen 
             item={items[currentIndex]}
             nextItem={items[currentIndex + 1]}
             currentIndex={currentIndex}
             totalItems={items.length}
             onVote={handleVote}
+            onEnd={handleEndSessionEarly}
+            onBack={() => setAppState('dashboard')}
+            onGoBack={currentIndex > 0 ? handleGoBack : undefined}
+          />
+        )}
+
+        {appState === 'voting' && items.length > 0 && taskParadigm === 'Arena-rank' && (
+          <ArenaRankVotingScreen
+            item={items[currentIndex]}
+            nextItem={items[currentIndex + 1]}
+            currentIndex={currentIndex}
+            totalItems={items.length}
+            models={taskModels}
+            onVote={handleRankVote}
             onEnd={handleEndSessionEarly}
             onBack={() => setAppState('dashboard')}
             onGoBack={currentIndex > 0 ? handleGoBack : undefined}
@@ -410,6 +517,8 @@ export function ModelEvalApp({ initialRoute = 'dashboard' }: ModelEvalAppProps) 
               onReset={handleReset} 
               userName={userName}
               modelNames={modelNames}
+              models={taskModels}
+              paradigm={taskParadigm}
               onGoToDashboard={() => setAppState('dashboard')}
             />
           </div>

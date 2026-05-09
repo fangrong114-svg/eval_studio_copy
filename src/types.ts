@@ -67,6 +67,7 @@ export interface EvaluationItem {
   id: string;
   modelA_Url: string; // Control or Model A
   modelB_Url: string; // Treatment or Model B
+  modelOutputs?: ModelOutput[]; // Arena-rank multi-model outputs
   prompt?: string;    // The prompt used to generate
   inputs?: Record<string, any>; // Flexible input columns
   startImageUrl?: string; // New: Specific field for start image
@@ -75,11 +76,26 @@ export interface EvaluationItem {
   isSwapped?: boolean; // New: If true, UI displays B on left and A on right for blind testing
 }
 
+export type EvalParadigm = 'GSB' | 'MOS' | 'Arena' | 'Arena-rank';
+
+export interface ModelOutput {
+  modelId: string;
+  modelName: string;
+  url: string;
+}
+
 export type VoteType = 'A' | 'B' | 'Tie';
+
+export interface RankingEntry {
+  modelId: string;
+  modelName: string;
+  rank: number;
+}
 
 export interface VoteRecord {
   itemId: string;
-  vote: VoteType;
+  vote?: VoteType;
+  ranking?: RankingEntry[];
   timestamp: number;
   user?: string; // Who voted
 }
@@ -98,6 +114,8 @@ export interface HistorySession {
   timestamp: number;
   userName: string;
   modelNames: { a: string; b: string };
+  models?: { id: string; name: string }[];
+  paradigm?: EvalParadigm;
   items: EvaluationItem[];
   votes: VoteRecord[];
 }
@@ -153,7 +171,7 @@ export interface EvalTemplate {
   id: string;
   name: string;
   description: string;
-  paradigm: 'GSB' | 'MOS' | 'Arena';
+  paradigm: EvalParadigm;
   dimensions: EvalDimension[];
   creatorUid?: string;
   creatorName?: string;

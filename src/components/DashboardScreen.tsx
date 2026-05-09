@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Layers, Plus, Search, Filter, Calendar, Users, BarChart2, ArrowRight, Activity, Target, Link as LinkIcon, LogIn, LogOut, X, Edit2, Database, LayoutTemplate, Play, ChevronRight, FolderOpen, Trash2 } from 'lucide-react';
-import { EvaluationProject, EvaluationStep, EvaluationItem, EvalTask } from '../types';
+import { EvalParadigm, EvaluationProject, EvaluationStep, EvaluationItem, EvalTask } from '../types';
 import { CreateProjectModal } from './CreateProjectModal';
 import { db, auth, signInWithGoogle, logout } from '../firebase';
 import { collection, onSnapshot, addDoc, serverTimestamp, query, orderBy, doc, updateDoc, where, getDocs, getDoc, setDoc, deleteDoc } from 'firebase/firestore';
@@ -9,7 +9,7 @@ import { onAuthStateChanged } from 'firebase/auth';
 interface DashboardScreenProps {
   initialProject?: EvaluationProject | null;
   onProjectSelect?: (project: EvaluationProject | null) => void;
-  onGoToExecution: (project: EvaluationProject, taskItems?: EvaluationItem[], taskName?: string, modelNames?: { a: string, b: string }, taskId?: string, existingVotes?: any[]) => void;
+  onGoToExecution: (project: EvaluationProject, taskItems?: EvaluationItem[], taskName?: string, modelNames?: { a: string, b: string }, taskId?: string, existingVotes?: any[], paradigm?: EvalParadigm, models?: { id: string; name: string }[]) => void;
   onGoToAnalysis: (project: EvaluationProject) => void;
   onGoToDatasetRepo: () => void;
   onGoToTemplateRepo: () => void;
@@ -281,8 +281,29 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({ initialProject
 
   const handleStartTask = async (task: EvalTask) => {
     try {
+      const template = templates.find(t => t.id === task.templateId);
+      const paradigm = (template?.paradigm || 'Arena') as EvalParadigm;
+      const taskModelList = task.models?.length ? task.models : [
+        { id: 'model-a', name: 'Model A' },
+        { id: 'model-b', name: 'Model B' }
+      ];
       const itemsSnapshot = await getDocs(collection(db, 'evalTasks', task.id, 'items'));
-      let items = itemsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as EvaluationItem));
+      let items = itemsSnapshot.docs.map(docSnap => {
+        const data = { id: docSnap.id, ...docSnap.data() } as EvaluationItem;
+        if (!data.modelOutputs?.length) {
+          const originalData = (data as any).originalData || {};
+          data.modelOutputs = taskModelList.map((model, idx) => ({
+            modelId: model.id || `model-${idx}`,
+            modelName: model.name || `Model ${idx + 1}`,
+            url: idx === 0
+              ? data.modelA_Url
+              : idx === 1
+                ? data.modelB_Url
+                : originalData[model.name] || originalData[model.id] || ''
+          })).filter(output => output.url);
+        }
+        return data;
+      });
       
       if (items.length === 0 && task.datasetId && task.datasetId !== 'external-csv') {
         // Fetch from dataset
@@ -292,12 +313,17 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({ initialProject
           if (dsData.items && dsData.items.length > 0) {
             items = dsData.items.map((row: any, idx: number) => {
               const keys = Object.keys(row);
-              const modelBKey = keys[keys.length - 1];
-              const modelAKey = keys[keys.length - 2];
+              const fallbackModelKeys = keys.filter(key => !key.toLowerCase().includes('id')).slice(-(taskModelList.length || 2));
+              const modelKeys = taskModelList.map((model, modelIdx) => (
+                row[model.name] !== undefined ? model.name :
+                row[model.id] !== undefined ? model.id :
+                fallbackModelKeys[modelIdx]
+              )).filter(Boolean);
+              const modelAKey = modelKeys[0] || keys[keys.length - 2];
+              const modelBKey = modelKeys[1] || keys[keys.length - 1];
               
               const inputs = { ...row };
-              delete inputs[modelAKey];
-              delete inputs[modelBKey];
+              modelKeys.forEach(key => delete inputs[key]);
               
               let startImageUrl: string | undefined;
               let referenceUrls: string[] = [];
@@ -327,6 +353,11 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({ initialProject
                 id: `ds-item-${idx}`,
                 modelA_Url: row[modelAKey] || '',
                 modelB_Url: row[modelBKey] || '',
+                modelOutputs: taskModelList.map((model, modelIdx) => ({
+                  modelId: model.id || `model-${modelIdx}`,
+                  modelName: model.name || `Model ${modelIdx + 1}`,
+                  url: row[modelKeys[modelIdx]] || ''
+                })).filter(output => output.url),
                 inputs,
                 prompt: inputs['prompt'] || inputs['提示词'] || Object.values(inputs)[0] || '',
                 type: task.outputType || 'text',
@@ -348,8 +379,8 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({ initialProject
       }
       
       const modelNames = {
-        a: task.models[0]?.name || 'Model A',
-        b: task.models[1]?.name || 'Model B'
+        a: taskModelList[0]?.name || 'Model A',
+        b: taskModelList[1]?.name || 'Model B'
       };
       
       const userName = auth.currentUser?.email || auth.currentUser?.displayName || localStorage.getItem('eval_username') || 'Anonymous';
@@ -372,7 +403,7 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({ initialProject
         console.error("Failed to fetch existing votes or update progress", e);
       }
       
-      onGoToExecution(selectedProject!, items, task.name, modelNames, task.id, existingVotes);
+      onGoToExecution(selectedProject!, items, task.name, modelNames, task.id, existingVotes, paradigm, taskModelList);
     } catch (error) {
       console.error("Error fetching task items:", error);
       alert("获取评测数据失败");

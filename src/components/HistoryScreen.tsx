@@ -1,6 +1,7 @@
 import React from 'react';
 import { Download, Trash2, Calendar, User, ArrowLeft, BarChart3 } from 'lucide-react';
 import { HistorySession, VotingStats } from '../types';
+import { calculateArenaRankModelStats, getBordaScore, isArenaRankVote, sortRanking } from '../rankingUtils';
 
 interface HistoryScreenProps {
   history: HistorySession[];
@@ -26,6 +27,47 @@ const HistoryScreen: React.FC<HistoryScreenProps> = ({ history, onBack, onClearH
   };
 
   const downloadCSV = (session: HistorySession) => {
+    if (session.paradigm === 'Arena-rank') {
+      const rankVotes = session.votes.filter(isArenaRankVote);
+      const modelList = session.models?.length
+        ? session.models
+        : calculateArenaRankModelStats(rankVotes).map(stat => ({ id: stat.modelId, name: stat.modelName }));
+      const maxRankCount = Math.max(0, ...rankVotes.map(v => v.ranking?.length || 0));
+      const rankHeaders = Array.from({ length: maxRankCount }, (_, idx) => `rank_${idx + 1}`);
+      const modelHeaders = modelList.flatMap(model => [`${model.name}_rank`, `${model.name}_score`]);
+      const headers = ['ItemID', 'Timestamp', 'User', ...rankHeaders, ...modelHeaders, 'ranking_json'];
+      const rows = rankVotes.map(v => {
+        const ranking = sortRanking(v.ranking);
+        const rankValues = rankHeaders.map((_, idx) => {
+          const entry = ranking[idx];
+          return entry ? `${entry.modelName} (${entry.modelId})` : '';
+        });
+        const modelValues = modelList.flatMap(model => {
+          const entry = ranking.find(candidate => candidate.modelId === model.id);
+          return [entry?.rank || '', entry ? getBordaScore(entry.rank, ranking.length) : ''];
+        });
+        return [
+          v.itemId,
+          new Date(v.timestamp).toISOString(),
+          session.userName || 'Anonymous',
+          ...rankValues,
+          ...modelValues,
+          JSON.stringify(ranking)
+        ].map(field => `"${String(field ?? '').replace(/"/g, '""')}"`).join(',');
+      });
+
+      const csvContent = [headers.join(','), ...rows].join('\n');
+      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.setAttribute('href', url);
+      link.setAttribute('download', `arena_rank_results_${session.userName || 'anon'}_${new Date(session.timestamp).toISOString().slice(0,10)}.csv`);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      return;
+    }
+
     const headers = ['ItemID', 'ModelA_URL', 'ModelB_URL', 'Winner', 'Timestamp', 'User', 'ModelA_Name', 'ModelB_Name', 'References'];
     const rows = session.votes.map(v => {
       const item = session.items.find(i => i.id === v.itemId);
@@ -97,6 +139,8 @@ const HistoryScreen: React.FC<HistoryScreenProps> = ({ history, onBack, onClearH
       ) : (
         <div className="space-y-4">
           {history.sort((a, b) => b.timestamp - a.timestamp).map((session) => {
+            const isRankSession = session.paradigm === 'Arena-rank';
+            const rankStats = calculateArenaRankModelStats(session.votes.filter(isArenaRankVote));
             const stats = calculateStats(session.votes);
             const aPercent = stats.total ? Math.round((stats.aCount / stats.total) * 100) : 0;
             const bPercent = stats.total ? Math.round((stats.bCount / stats.total) * 100) : 0;
@@ -114,9 +158,19 @@ const HistoryScreen: React.FC<HistoryScreenProps> = ({ history, onBack, onClearH
                       <span className="flex items-center gap-1"><User size={14} /> {session.userName}</span>
                     </div>
                     <div className="flex items-center gap-2 font-bold text-slate-200 text-lg">
-                      <span className="text-blue-400">{session.modelNames.a}</span>
-                      <span className="text-slate-400">vs</span>
-                      <span className="text-indigo-400">{session.modelNames.b}</span>
+                      {isRankSession ? (
+                        <>
+                          <span className="text-amber-400">Arena-rank</span>
+                          <span className="text-slate-400">top:</span>
+                          <span className="text-slate-200">{rankStats[0]?.modelName || '-'}</span>
+                        </>
+                      ) : (
+                        <>
+                          <span className="text-blue-400">{session.modelNames.a}</span>
+                          <span className="text-slate-400">vs</span>
+                          <span className="text-indigo-400">{session.modelNames.b}</span>
+                        </>
+                      )}
                     </div>
                     <div className="text-sm text-slate-400 mt-1">
                       已评测 {session.items.length} 项

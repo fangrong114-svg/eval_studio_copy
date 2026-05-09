@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { ArrowLeft, Plus, Save, Trash2, Database, LayoutTemplate, Box, CheckCircle2, Play, Link as LinkIcon, Upload, X, Users, Edit, Eye, Loader2, ClipboardList } from 'lucide-react';
-import { EvalDataset, EvalTemplate, EvalTask, EvalDimension, EvaluationItem } from '../types';
+import { EvalDataset, EvalTemplate, EvalTask, EvalDimension, EvalParadigm, EvaluationItem } from '../types';
 import { db, auth } from '../firebase';
 import { collection, onSnapshot, addDoc, serverTimestamp, query, orderBy, doc, updateDoc, deleteDoc, where, setDoc, getDocs } from 'firebase/firestore';
 import { ConfirmModal } from './ConfirmModal';
@@ -51,7 +51,7 @@ export default function TaskBuilderScreen({ projectId, onBack, initialMode = 'cr
   // Inline Template Creation State
   const [showCreateTemplateModal, setShowCreateTemplateModal] = useState(false);
   const [newTemplateName, setNewTemplateName] = useState('');
-  const [newTemplateParadigm, setNewTemplateParadigm] = useState<'GSB' | 'MOS' | 'Arena'>('GSB');
+  const [newTemplateParadigm, setNewTemplateParadigm] = useState<EvalParadigm>('GSB');
   const [taskToDelete, setTaskToDelete] = useState<string | null>(null);
   
   // Item Editing State
@@ -126,9 +126,12 @@ export default function TaskBuilderScreen({ projectId, onBack, initialMode = 'cr
     const selectedTemplate = templates.find(t => t.id === newTask.templateId);
     if (!selectedTemplate) return "选择的评测模板无效";
 
-    if (csvData.length > 0) {
+    if (csvData.length > 0 || newTask.datasetId) {
       if (inputColumns.length === 0) return "请至少选择一个输入列";
-      if (selectedTemplate.paradigm === 'GSB' && modelColumns.length < 2) {
+      if (selectedTemplate.paradigm === 'Arena-rank' && modelColumns.length < 3) {
+        return "Arena-rank requires at least three model result columns.";
+      }
+      if ((selectedTemplate.paradigm === 'GSB' || selectedTemplate.paradigm === 'Arena') && modelColumns.length < 2) {
         return "GSB 评测模板需要至少两列模型结果，请补充选择。";
       }
       if (selectedTemplate.paradigm === 'MOS' && modelColumns.length < 1) {
@@ -291,6 +294,11 @@ export default function TaskBuilderScreen({ projectId, onBack, initialMode = 'cr
               inputs: inputColumns.reduce((acc, col) => ({ ...acc, [col]: row[col] }), {}),
               modelA_Url: modelColumns[0] ? row[modelColumns[0]] : '',
               modelB_Url: modelColumns[1] ? row[modelColumns[1]] : '',
+              modelOutputs: taskModels.map((model, idx) => ({
+                modelId: model.id,
+                modelName: model.name,
+                url: modelColumns[idx] ? row[modelColumns[idx]] : ''
+              })).filter(output => output.url),
               type: newTask.outputType || 'text',
               originalData: row
             };
@@ -507,11 +515,12 @@ export default function TaskBuilderScreen({ projectId, onBack, initialMode = 'cr
       (h.includes('Slot') || h.includes('Out') || h.includes('Model') || h.includes('模型') || h.includes('URL_'))
     );
     
+    const selectedParadigm = templates.find(t => t.id === newTask.templateId)?.paradigm;
     if (models.length >= 2) {
-      setModelColumns(models.slice(0, 2));
+      setModelColumns(selectedParadigm === 'Arena-rank' ? models : models.slice(0, 2));
     } else {
       const otherCols = headers.filter(h => h !== promptCol && h !== startImgCol && !h.toLowerCase().includes('id'));
-      setModelColumns(otherCols.slice(0, 2));
+      setModelColumns(selectedParadigm === 'Arena-rank' ? otherCols : otherCols.slice(0, 2));
     }
     
     // Auto-detect output type
@@ -569,6 +578,8 @@ export default function TaskBuilderScreen({ projectId, onBack, initialMode = 'cr
       defaultDimensions = [{ id: `dim-${Date.now()}`, name: '整体评价', description: '综合评估', type: 'radio_select', options: ['A 更好', 'B 更好', '平局'] }];
     } else if (newTemplateParadigm === 'MOS') {
       defaultDimensions = [{ id: `dim-${Date.now()}`, name: '整体质量', description: '1-5分综合评分', type: 'star_rating' }];
+    } else if (newTemplateParadigm === 'Arena-rank') {
+      defaultDimensions = [{ id: `dim-${Date.now()}`, name: 'Arena-rank ranking', description: 'Rank three or more videos from best to worst.', type: 'radio_select', options: ['Full ranking'] }];
     } else {
       defaultDimensions = [{ id: `dim-${Date.now()}`, name: '竞技场排位', description: '选择你认为更好的模型', type: 'radio_select', options: ['模型 A', '模型 B', '平局', '都很差'] }];
     }
@@ -767,7 +778,8 @@ export default function TaskBuilderScreen({ projectId, onBack, initialMode = 'cr
 
                             // Auto-detect model columns
                             const models = headers.filter(h => h !== promptCol && !h.toLowerCase().includes('id') && !h.includes('结果'));
-                            setModelColumns(models.slice(0, 2)); // Default to first 2
+                            const selectedParadigm = templates.find(t => t.id === newTask.templateId)?.paradigm;
+                            setModelColumns(selectedParadigm === 'Arena-rank' ? models : models.slice(0, 2)); // Default to first 2 unless rank needs all
                           } else {
                             setCsvHeaders([]);
                           }
@@ -1340,12 +1352,13 @@ export default function TaskBuilderScreen({ projectId, onBack, initialMode = 'cr
                 <label className="block text-sm font-medium text-slate-200 mb-1">评测范式</label>
                 <select 
                   value={newTemplateParadigm}
-                  onChange={(e) => setNewTemplateParadigm(e.target.value as 'GSB' | 'MOS' | 'Arena')}
+                  onChange={(e) => setNewTemplateParadigm(e.target.value as EvalParadigm)}
                   className="w-full px-4 py-2 glass-input rounded-xl focus:ring-2 focus:ring-amber-500 focus:border-amber-500"
                 >
                   <option value="GSB">GSB (Good/Same/Bad) - A/B对比</option>
                   <option value="MOS">MOS (1-5分) - 单项打分</option>
                   <option value="Arena">Arena - 盲测排位</option>
+                  <option value="Arena-rank">Arena-rank - 多视频排序</option>
                 </select>
                 <p className="text-xs text-slate-300 mt-2">
                   系统会自动为您生成默认的打分维度。如需自定义更多维度，请前往“评测模板仓库”。
@@ -1546,14 +1559,15 @@ export default function TaskBuilderScreen({ projectId, onBack, initialMode = 'cr
                       {/* Models Output */}
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         {viewingTask.models.map((model, mIdx) => {
+                          const modelOutput = item.modelOutputs?.find(output => output.modelId === model.id) || item.modelOutputs?.[mIdx];
                           const outputKey = mIdx === 0 ? 'modelA_Url' : 'modelB_Url';
-                          const outputValue = isEditing ? editItemForm[outputKey] : (mIdx === 0 ? item.modelA_Url : item.modelB_Url);
+                          const outputValue = isEditing && mIdx < 2 ? editItemForm[outputKey] : (modelOutput?.url || (mIdx === 0 ? item.modelA_Url : item.modelB_Url));
                           return (
                             <div key={model.id} className="border border-white/10 rounded-lg overflow-hidden">
                               <div className="bg-white/5 px-3 py-2 text-xs font-medium text-slate-300 border-b border-white/10">
                                 {model.name}
                               </div>
-                              {isEditing ? (
+                              {isEditing && mIdx < 2 ? (
                                 <textarea 
                                   className="w-full p-3 border-0 text-sm font-mono focus:ring-0"
                                   rows={6}

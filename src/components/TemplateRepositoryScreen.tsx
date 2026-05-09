@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { LayoutTemplate, Plus, Settings, ArrowRight, Trash2, Edit2, FileText, CheckCircle2 } from 'lucide-react';
-import { EvalTemplate, EvalDimension } from '../types';
+import { EvalTemplate, EvalDimension, EvalParadigm } from '../types';
 import { db, auth } from '../firebase';
 import { collection, doc, setDoc, onSnapshot, query, orderBy, deleteDoc } from 'firebase/firestore';
 import { ConfirmModal } from './ConfirmModal';
@@ -18,7 +18,7 @@ const TemplateRepositoryScreen: React.FC<TemplateRepositoryScreenProps> = ({ onB
   // New Template Form State
   const [newName, setNewName] = useState('');
   const [newDesc, setNewDesc] = useState('');
-  const [newParadigm, setNewParadigm] = useState<'GSB' | 'MOS' | 'Arena'>('GSB');
+  const [newParadigm, setNewParadigm] = useState<EvalParadigm>('GSB');
   const [dimensions, setDimensions] = useState<EvalDimension[]>([
     { id: 'dim-new-1', name: '整体评价', description: '综合评估', type: 'radio_select', options: ['A 更好', 'B 更好', '平局'] }
   ]);
@@ -147,12 +147,13 @@ const TemplateRepositoryScreen: React.FC<TemplateRepositoryScreenProps> = ({ onB
               <div>
                 <label className="block text-sm font-medium text-slate-300 mb-1.5">评测范式 (Paradigm)</label>
                 <select 
-                  value={newParadigm} onChange={e => setNewParadigm(e.target.value as 'GSB' | 'MOS' | 'Arena')}
+                  value={newParadigm} onChange={e => setNewParadigm(e.target.value as EvalParadigm)}
                   className="w-full px-4 py-2.5 glass-input rounded-xl text-sm text-slate-200 focus:ring-2 focus:ring-amber-500/50 focus:border-amber-500/50 outline-none transition-all"
                 >
                   <option value="GSB" className="bg-black/40">GSB (Good/Same/Bad) - 适用于 A/B 对比</option>
                   <option value="MOS" className="bg-black/40">MOS (Mean Opinion Score) - 适用于单项打分 (1-5分)</option>
                   <option value="Arena" className="bg-black/40">Arena (竞技场) - 适用于多模型盲测排位</option>
+                  <option value="Arena-rank" className="bg-black/40">Arena-rank - 多视频排序</option>
                 </select>
               </div>
             </div>

@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Upload, FileText, BarChart3, Users, AlertCircle, PlusCircle, Download, ArrowRight, Database, Loader2 } from 'lucide-react';
-import { AggregatedResult, EvalTask } from '../types';
+import { AggregatedResult, EvalParadigm, EvalTask, EvalTemplate, VoteRecord } from '../types';
+import { calculateArenaRankCaseSummaries, calculateArenaRankModelStats, getBordaScore, isArenaRankVote, sortRanking } from '../rankingUtils';
 import { RESULTS_TEMPLATE_CSV } from '../constants';
 import { db, handleFirestoreError } from '../firebase';
 import { collection, getDocs, query, orderBy } from 'firebase/firestore';
@@ -17,10 +18,13 @@ const AnalysisScreen: React.FC<AnalysisScreenProps> = ({ onBack, onGoToDashboard
   const [uniqueVoters, setUniqueVoters] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const [tasks, setTasks] = useState<EvalTask[]>([]);
+  const [templates, setTemplates] = useState<EvalTemplate[]>([]);
   const [loadingTasks, setLoadingTasks] = useState(false);
   const [selectedTaskId, setSelectedTaskId] = useState<string>('');
   const [loadingResults, setLoadingResults] = useState(false);
   const [isDownloadingTemplate, setIsDownloadingTemplate] = useState(false);
+  const [analysisMode, setAnalysisMode] = useState<EvalParadigm | null>(null);
+  const [rankVotes, setRankVotes] = useState<VoteRecord[]>([]);
 
   useEffect(() => {
     const fetchTasks = async () => {
@@ -33,6 +37,13 @@ const AnalysisScreen: React.FC<AnalysisScreenProps> = ({ onBack, onGoToDashboard
           fetchedTasks.push({ id: doc.id, ...doc.data() } as EvalTask);
         });
         setTasks(fetchedTasks);
+
+        const templatesSnapshot = await getDocs(collection(db, 'evalTemplates'));
+        const fetchedTemplates: EvalTemplate[] = [];
+        templatesSnapshot.forEach(doc => {
+          fetchedTemplates.push({ id: doc.id, ...doc.data() } as EvalTemplate);
+        });
+        setTemplates(fetchedTemplates);
       } catch (err) {
         handleFirestoreError(err, 'list', 'evalTasks');
       } finally {
@@ -47,8 +58,38 @@ const AnalysisScreen: React.FC<AnalysisScreenProps> = ({ onBack, onGoToDashboard
     setLoadingResults(true);
     setError(null);
     try {
+      const selectedTask = tasks.find(task => task.id === selectedTaskId);
+      const selectedTemplate = templates.find(template => template.id === selectedTask?.templateId);
+      const selectedParadigm = (selectedTemplate?.paradigm || 'Arena') as EvalParadigm;
       const votesRef = collection(db, 'evalTasks', selectedTaskId, 'userVotes');
       const snapshot = await getDocs(votesRef);
+
+      if (selectedParadigm === 'Arena-rank') {
+        const importedRankVotes: VoteRecord[] = [];
+        const voters = new Set<string>();
+
+        snapshot.forEach(docSnap => {
+          const userData = docSnap.data();
+          const userVotes = userData.votes || [];
+          const user = docSnap.id;
+
+          userVotes.forEach((v: VoteRecord) => {
+            if (!v.itemId || !isArenaRankVote(v)) return;
+            importedRankVotes.push({ ...v, user: v.user || user });
+            voters.add(user);
+          });
+        });
+
+        if (importedRankVotes.length === 0) {
+          setError("该 Arena-rank 任务暂无排名结果。");
+        } else {
+          setRankVotes(importedRankVotes);
+          setAggregatedData([]);
+          setUniqueVoters(voters);
+          setAnalysisMode('Arena-rank');
+        }
+        return;
+      }
       
       const newAggregated: Record<string, AggregatedResult> = {};
       const voters = new Set<string>();
@@ -88,13 +129,51 @@ const AnalysisScreen: React.FC<AnalysisScreenProps> = ({ onBack, onGoToDashboard
         setError("该任务暂无评测结果。");
       } else {
         setAggregatedData(Object.values(newAggregated));
+        setRankVotes([]);
         setUniqueVoters(voters);
+        setAnalysisMode(selectedParadigm);
       }
     } catch (err: any) {
       handleFirestoreError(err, 'list', `evalTasks/${selectedTaskId}/userVotes`);
     } finally {
       setLoadingResults(false);
     }
+  };
+
+  const parseRankingRow = (row: any, keys: string[]) => {
+    const rankingJsonKey = keys.find(k => k.toLowerCase() === 'ranking_json' || k.toLowerCase() === 'ranking');
+    if (rankingJsonKey && row[rankingJsonKey]) {
+      try {
+        const parsed = JSON.parse(row[rankingJsonKey]);
+        if (Array.isArray(parsed)) {
+          return parsed
+            .filter(entry => entry.modelId && entry.rank)
+            .map(entry => ({
+              modelId: String(entry.modelId),
+              modelName: String(entry.modelName || entry.modelId),
+              rank: Number(entry.rank)
+            }));
+        }
+      } catch (err) {
+        console.error("Failed to parse ranking_json", err);
+      }
+    }
+
+    const rankKeys = keys
+      .filter(k => /^rank_\d+$/i.test(k))
+      .sort((a, b) => Number(a.split('_')[1]) - Number(b.split('_')[1]));
+
+    return rankKeys
+      .map((key, index) => {
+        const rawValue = String(row[key] || '').trim();
+        if (!rawValue) return null;
+
+        const idMatch = rawValue.match(/\(([^)]+)\)\s*$/);
+        const modelName = rawValue.replace(/\s*\([^)]+\)\s*$/, '').trim() || rawValue;
+        const modelId = idMatch?.[1] || modelName;
+        return { modelId, modelName, rank: index + 1 };
+      })
+      .filter(Boolean);
   };
   
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -104,10 +183,12 @@ const AnalysisScreen: React.FC<AnalysisScreenProps> = ({ onBack, onGoToDashboard
 
     setTotalFiles(files.length);
     const newAggregated: Record<string, AggregatedResult> = {};
+    const newRankVotes: VoteRecord[] = [];
     const voters = new Set<string>();
 
     let filesProcessed = 0;
     let validRowsFound = 0;
+    let rankRowsFound = 0;
 
     Array.from(files).forEach((file: File) => {
       Papa.parse<any>(file, {
@@ -124,6 +205,19 @@ const AnalysisScreen: React.FC<AnalysisScreenProps> = ({ onBack, onGoToDashboard
             const itemId = itemIdKey ? row[itemIdKey] : null;
             const winner = winnerKey ? row[winnerKey] : null;
             const user = (userKey ? row[userKey] : null) || 'Anonymous';
+            const ranking = parseRankingRow(row, keys);
+
+            if (itemId && ranking.length >= 3) {
+              rankRowsFound++;
+              voters.add(user);
+              newRankVotes.push({
+                itemId,
+                ranking,
+                timestamp: Date.now(),
+                user
+              });
+              return;
+            }
 
             if (!itemId || !['A', 'B', 'Tie'].includes(winner)) return;
 
@@ -147,12 +241,19 @@ const AnalysisScreen: React.FC<AnalysisScreenProps> = ({ onBack, onGoToDashboard
 
           filesProcessed++;
           if (filesProcessed === files.length) {
-            if (validRowsFound === 0) {
+            if (rankRowsFound > 0) {
+              setRankVotes(newRankVotes);
+              setAggregatedData([]);
+              setUniqueVoters(voters);
+              setAnalysisMode('Arena-rank');
+            } else if (validRowsFound === 0) {
               setError("未能从上传的文件中识别出有效的投票结果。请确保 CSV 文件包含 'Item ID' 和 'Winner' 列。");
               setTotalFiles(0);
             } else {
               setAggregatedData(Object.values(newAggregated));
+              setRankVotes([]);
               setUniqueVoters(voters);
+              setAnalysisMode('Arena');
             }
           }
         },
@@ -184,6 +285,10 @@ const AnalysisScreen: React.FC<AnalysisScreenProps> = ({ onBack, onGoToDashboard
       }
 
       const csvData: any[] = [];
+      const selectedTask = tasks.find(t => t.id === selectedTaskId);
+      const selectedTemplate = templates.find(t => t.id === selectedTask?.templateId);
+      const isRankTemplate = selectedTemplate?.paradigm === 'Arena-rank';
+      const maxOutputs = Math.max(0, ...snapshot.docs.map(doc => (doc.data().modelOutputs || []).length));
       
       snapshot.docs.forEach(doc => {
         const data = doc.data();
@@ -203,7 +308,14 @@ const AnalysisScreen: React.FC<AnalysisScreenProps> = ({ onBack, onGoToDashboard
         }
 
         // Add result columns
-        row['Winner'] = '';
+        if (isRankTemplate) {
+          for (let i = 1; i <= Math.max(maxOutputs, 3); i++) {
+            row[`rank_${i}`] = '';
+          }
+          row['ranking_json'] = '';
+        } else {
+          row['Winner'] = '';
+        }
         row['User'] = '';
         
         csvData.push(row);
@@ -236,6 +348,45 @@ const AnalysisScreen: React.FC<AnalysisScreenProps> = ({ onBack, onGoToDashboard
 
   const percentA = totalVotes ? Math.round((totalA / totalVotes) * 100) : 0;
   const percentB = totalVotes ? Math.round((totalB / totalVotes) * 100) : 0;
+  const isArenaRankAnalysis = analysisMode === 'Arena-rank';
+  const rankModelStats = calculateArenaRankModelStats(rankVotes);
+  const rankCaseSummaries = calculateArenaRankCaseSummaries(rankVotes);
+
+  const escapeCsvField = (value: any) => `"${String(value ?? '').replace(/"/g, '""')}"`;
+
+  const downloadAnalysisCsv = () => {
+    let csvContent = '';
+
+    if (isArenaRankAnalysis) {
+      const headers = ['ItemID', 'Voters', 'ConsensusRanking', 'ModelStats'];
+      const rows = rankCaseSummaries.map(item => [
+        item.itemId,
+        item.voterCount,
+        item.ranking.map(entry => `#${entry.averageRank.toFixed(2)} ${entry.modelName}`).join(' | '),
+        item.ranking.map(entry => `${entry.modelName}: score=${entry.totalScore}, avgRank=${entry.averageRank.toFixed(2)}, first=${entry.firstPlaceCount}`).join(' | ')
+      ].map(escapeCsvField).join(','));
+      csvContent = [headers.join(','), ...rows].join('\n');
+    } else {
+      const headers = ['ItemID', 'A', 'B', 'Tie', 'Voters'];
+      const rows = aggregatedData.map(item => [
+        item.itemId,
+        item.votes.A,
+        item.votes.B,
+        item.votes.Tie,
+        item.voters.join(' | ')
+      ].map(escapeCsvField).join(','));
+      csvContent = [headers.join(','), ...rows].join('\n');
+    }
+
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.setAttribute('href', url);
+    link.setAttribute('download', `${isArenaRankAnalysis ? 'arena_rank' : 'arena'}_analysis_${new Date().toISOString().slice(0,10)}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
 
   return (
     <div className="max-w-6xl mx-auto p-6 animate-in fade-in duration-500">
@@ -267,7 +418,7 @@ const AnalysisScreen: React.FC<AnalysisScreenProps> = ({ onBack, onGoToDashboard
         </div>
       )}
 
-      {aggregatedData.length === 0 ? (
+      {aggregatedData.length === 0 && rankVotes.length === 0 ? (
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           {/* Import from Platform Card */}
           <div className="glass-panel rounded-2xl p-8 flex flex-col items-center justify-center text-center shadow-sm hover:shadow-md transition-shadow">
@@ -349,6 +500,113 @@ const AnalysisScreen: React.FC<AnalysisScreenProps> = ({ onBack, onGoToDashboard
                 {isDownloadingTemplate ? <Loader2 size={18} className="animate-spin" /> : <Download size={18} />}
                 {isDownloadingTemplate ? '生成中...' : (selectedTaskId ? '下载数据模板' : '请先在左侧选择任务')}
               </button>
+            </div>
+          </div>
+        </div>
+      ) : isArenaRankAnalysis ? (
+        <div className="space-y-8">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <div className="glass-panel p-4 rounded-xl shadow-sm">
+              <div className="text-slate-400 text-xs font-bold uppercase tracking-wider mb-1">参与者</div>
+              <div className="flex items-center gap-2 text-2xl font-bold text-slate-100">
+                <Users className="text-purple-500" />
+                {uniqueVoters.size}
+              </div>
+              <div className="text-xs text-slate-400 truncate mt-1">{Array.from(uniqueVoters).join(', ')}</div>
+            </div>
+            <div className="glass-panel p-4 rounded-xl shadow-sm">
+              <div className="text-slate-400 text-xs font-bold uppercase tracking-wider mb-1">排名记录</div>
+              <div className="flex items-center gap-2 text-2xl font-bold text-slate-100">
+                <FileText className="text-blue-500" />
+                {rankVotes.length}
+              </div>
+            </div>
+            <div className="glass-panel p-4 rounded-xl shadow-sm">
+              <div className="text-slate-400 text-xs font-bold uppercase tracking-wider mb-1">最高积分</div>
+              <div className="flex items-center gap-2 text-2xl font-bold text-slate-100">
+                <BarChart3 className="text-amber-500" />
+                {rankModelStats[0]?.totalScore || 0}
+              </div>
+            </div>
+            <div className="glass-panel p-4 rounded-xl shadow-sm">
+              <div className="text-slate-400 text-xs font-bold uppercase tracking-wider mb-1">最佳平均名次</div>
+              <div className="flex items-center gap-2 text-2xl font-bold text-slate-100">
+                <BarChart3 className="text-emerald-500" />
+                {rankModelStats[0]?.averageRank.toFixed(2) || '-'}
+              </div>
+            </div>
+          </div>
+
+          <div className="glass-panel rounded-xl shadow-lg overflow-hidden">
+            <div className="p-6 border-b border-white/10 bg-white/5 flex justify-between items-center">
+              <h3 className="font-semibold text-slate-200">模型总积分榜</h3>
+              <button onClick={downloadAnalysisCsv} className="flex items-center gap-2 px-4 py-2 bg-black/40 glass-panel-hover text-white rounded-lg text-sm font-medium">
+                <Download size={16} /> 导出分析 CSV
+              </button>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse">
+                <thead className="bg-white/5">
+                  <tr>
+                    <th className="p-4 text-xs font-semibold text-slate-400 uppercase border-b border-white/10">排名</th>
+                    <th className="p-4 text-xs font-semibold text-slate-400 uppercase border-b border-white/10">模型</th>
+                    <th className="p-4 text-xs font-semibold text-slate-400 uppercase border-b border-white/10">总积分</th>
+                    <th className="p-4 text-xs font-semibold text-slate-400 uppercase border-b border-white/10">平均名次</th>
+                    <th className="p-4 text-xs font-semibold text-slate-400 uppercase border-b border-white/10">第一名次数</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rankModelStats.map((model, index) => (
+                    <tr key={model.modelId} className="border-b border-white/10 hover:bg-white/5">
+                      <td className="p-4 text-sm font-mono text-amber-300">#{index + 1}</td>
+                      <td className="p-4 text-sm font-bold text-slate-200">{model.modelName}</td>
+                      <td className="p-4 text-sm text-slate-200">{model.totalScore}</td>
+                      <td className="p-4 text-sm text-slate-200">{model.averageRank.toFixed(2)}</td>
+                      <td className="p-4 text-sm text-slate-200">{model.firstPlaceCount}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div className="glass-panel rounded-xl shadow-lg overflow-hidden">
+            <div className="p-6 border-b border-white/10 bg-white/5 flex justify-between items-center">
+              <h3 className="font-semibold text-slate-200">逐 case 共识排名</h3>
+              <label className="text-xs font-medium text-blue-400 cursor-pointer hover:underline">
+                <input type="file" multiple accept=".csv" className="hidden" onChange={handleFileUpload} />
+                + 添加更多文件
+              </label>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse">
+                <thead className="bg-white/5">
+                  <tr>
+                    <th className="p-4 text-xs font-semibold text-slate-400 uppercase border-b border-white/10">项目 ID</th>
+                    <th className="p-4 text-xs font-semibold text-slate-400 uppercase border-b border-white/10">参与人数</th>
+                    <th className="p-4 text-xs font-semibold text-slate-400 uppercase border-b border-white/10">共识排名</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rankCaseSummaries.map((item) => (
+                    <tr key={item.itemId} className="border-b border-white/10 hover:bg-white/5">
+                      <td className="p-4 text-sm text-slate-300 font-mono">{item.itemId}</td>
+                      <td className="p-4 text-sm text-slate-200">{item.voterCount}</td>
+                      <td className="p-4">
+                        <div className="flex flex-wrap gap-2">
+                          {item.ranking.map((entry, index) => (
+                            <span key={entry.modelId} className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-white/10 text-slate-200 border border-white/10">
+                              <span className="text-amber-300">#{index + 1}</span>
+                              {entry.modelName}
+                              <span className="text-slate-400">avg {entry.averageRank.toFixed(2)}</span>
+                            </span>
+                          ))}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           </div>
         </div>
