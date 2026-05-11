@@ -1,7 +1,7 @@
 import React from 'react';
 import { Download, Trash2, Calendar, User, ArrowLeft, BarChart3 } from 'lucide-react';
 import { HistorySession, VotingStats } from '../types';
-import { calculateArenaRankModelStats, getBordaScore, isArenaRankVote, sortRanking } from '../rankingUtils';
+import { calculateArenaRankModelStats, getArenaRankModelOutputUrl, getBordaScore, isArenaRankVote, resolveEvaluationItemPrompt, sortRanking } from '../rankingUtils';
 
 interface HistoryScreenProps {
   history: HistorySession[];
@@ -34,13 +34,19 @@ const HistoryScreen: React.FC<HistoryScreenProps> = ({ history, onBack, onClearH
         : calculateArenaRankModelStats(rankVotes).map(stat => ({ id: stat.modelId, name: stat.modelName }));
       const maxRankCount = Math.max(0, ...rankVotes.map(v => v.ranking?.length || 0));
       const rankHeaders = Array.from({ length: maxRankCount }, (_, idx) => `rank_${idx + 1}`);
+      const rankVideoHeaders = Array.from({ length: maxRankCount }, (_, idx) => `排名${idx + 1}视频链接`);
       const modelHeaders = modelList.flatMap(model => [`${model.name}_rank`, `${model.name}_score`]);
-      const headers = ['ItemID', 'Timestamp', 'User', ...rankHeaders, ...modelHeaders, 'ranking_json'];
+      const headers = ['ItemID', 'Prompt', 'Timestamp', 'User', ...rankHeaders, ...rankVideoHeaders, ...modelHeaders, 'ranking_json'];
       const rows = rankVotes.map(v => {
+        const item = session.items.find(candidate => candidate.id === v.itemId);
         const ranking = sortRanking(v.ranking);
         const rankValues = rankHeaders.map((_, idx) => {
           const entry = ranking[idx];
           return entry ? `${entry.modelName} (${entry.modelId})` : '';
+        });
+        const rankVideoValues = rankHeaders.map((_, idx) => {
+          const entry = ranking[idx];
+          return entry ? getArenaRankModelOutputUrl(item, entry, modelList) : '';
         });
         const modelValues = modelList.flatMap(model => {
           const entry = ranking.find(candidate => candidate.modelId === model.id);
@@ -48,9 +54,11 @@ const HistoryScreen: React.FC<HistoryScreenProps> = ({ history, onBack, onClearH
         });
         return [
           v.itemId,
+          resolveEvaluationItemPrompt(item),
           new Date(v.timestamp).toISOString(),
           session.userName || 'Anonymous',
           ...rankValues,
+          ...rankVideoValues,
           ...modelValues,
           JSON.stringify(ranking)
         ].map(field => `"${String(field ?? '').replace(/"/g, '""')}"`).join(',');

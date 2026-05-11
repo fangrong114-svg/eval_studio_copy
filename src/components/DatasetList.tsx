@@ -3,7 +3,7 @@ import { Dataset } from '../types';
 import { Badge } from './Badge';
 import { Database, Search, Plus, FileText, Image, Music, Video, X, Loader2 } from 'lucide-react';
 import { db, auth } from '../firebase';
-import { collection, getDocs, addDoc, query, orderBy, onSnapshot } from 'firebase/firestore';
+import { collection, addDoc, query, orderBy, onSnapshot } from '../localPlatform';
 
 export function DatasetList({ datasets: initialDatasets }: { datasets: Dataset[] }) {
   const [searchTerm, setSearchTerm] = useState('');
@@ -46,16 +46,13 @@ export function DatasetList({ datasets: initialDatasets }: { datasets: Dataset[]
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!auth.currentUser) {
-      alert("请先登录");
-      return;
-    }
+    const currentUser = auth.currentUser;
     setIsLoading(true);
     try {
       await addDoc(collection(db, 'datasets'), {
         ...formData,
-        creatorUid: auth.currentUser.uid,
-        creatorName: auth.currentUser.displayName || 'Unknown',
+        creatorUid: currentUser.uid,
+        creatorName: currentUser.displayName || 'Unknown',
         createdAt: Date.now()
       });
       setIsModalOpen(false);

@@ -1,16 +1,54 @@
 import React, { useState, useEffect } from 'react';
 import { Upload, FileText, BarChart3, Users, AlertCircle, PlusCircle, Download, ArrowRight, Database, Loader2 } from 'lucide-react';
-import { AggregatedResult, EvalParadigm, EvalTask, EvalTemplate, VoteRecord } from '../types';
-import { calculateArenaRankCaseSummaries, calculateArenaRankModelStats, getBordaScore, isArenaRankVote, sortRanking } from '../rankingUtils';
+import { AggregatedResult, EvalParadigm, EvalTask, EvalTemplate, ModelOutput, RankingEntry, VoteRecord } from '../types';
+import { ArenaRankPromptItem, calculateArenaRankCaseSummaries, calculateArenaRankModelStats, getArenaRankModelOutputUrl, getBordaScore, isArenaRankVote, resolveEvaluationItemPrompt, sortRanking } from '../rankingUtils';
 import { RESULTS_TEMPLATE_CSV } from '../constants';
 import { db, handleFirestoreError } from '../firebase';
-import { collection, getDocs, query, orderBy } from 'firebase/firestore';
+import { collection, getDocs, query, orderBy } from '../localPlatform';
+import ArenaRankVideoPreviewList from './ArenaRankVideoPreviewList';
 import Papa from 'papaparse';
 
 interface AnalysisScreenProps {
   onBack: () => void;
   onGoToDashboard?: () => void;
 }
+
+const normalizeCsvHeader = (value: string) => value.trim().toLowerCase().replace(/\s+/g, '').replace(/-/g, '_');
+
+const getRankVideoUrlFromRow = (row: any, keys: string[], rank: number): string => {
+  const candidates = new Set([
+    `排名${rank}视频链接`,
+    `rank_${rank}_video_url`,
+    `rank_${rank}_url`,
+    `ranking_${rank}_video_url`,
+    `ranking_${rank}_url`
+  ].map(normalizeCsvHeader));
+  const key = keys.find(candidate => candidates.has(normalizeCsvHeader(candidate)));
+  const value = key ? row[key] : '';
+  return String(value ?? '').trim();
+};
+
+const buildModelOutputsFromRanking = (row: any, keys: string[], ranking: RankingEntry[]): ModelOutput[] =>
+  sortRanking(ranking)
+    .map(entry => ({
+      modelId: entry.modelId,
+      modelName: entry.modelName,
+      url: getRankVideoUrlFromRow(row, keys, entry.rank)
+    }))
+    .filter(output => output.url);
+
+const mergeModelOutputs = (existing: ModelOutput[] = [], incoming: ModelOutput[] = []): ModelOutput[] => {
+  const merged = new Map<string, ModelOutput>();
+  const addOutput = (output: ModelOutput) => {
+    if (!output.url) return;
+    const key = `${output.modelId || ''}::${output.modelName || ''}`.toLowerCase();
+    if (!merged.has(key)) merged.set(key, output);
+  };
+
+  existing.forEach(addOutput);
+  incoming.forEach(addOutput);
+  return Array.from(merged.values());
+};
 
 const AnalysisScreen: React.FC<AnalysisScreenProps> = ({ onBack, onGoToDashboard }) => {
   const [aggregatedData, setAggregatedData] = useState<AggregatedResult[]>([]);
@@ -25,6 +63,7 @@ const AnalysisScreen: React.FC<AnalysisScreenProps> = ({ onBack, onGoToDashboard
   const [isDownloadingTemplate, setIsDownloadingTemplate] = useState(false);
   const [analysisMode, setAnalysisMode] = useState<EvalParadigm | null>(null);
   const [rankVotes, setRankVotes] = useState<VoteRecord[]>([]);
+  const [rankItems, setRankItems] = useState<ArenaRankPromptItem[]>([]);
 
   useEffect(() => {
     const fetchTasks = async () => {
@@ -66,6 +105,11 @@ const AnalysisScreen: React.FC<AnalysisScreenProps> = ({ onBack, onGoToDashboard
 
       if (selectedParadigm === 'Arena-rank') {
         const importedRankVotes: VoteRecord[] = [];
+        const itemsSnapshot = await getDocs(collection(db, 'evalTasks', selectedTaskId, 'items'));
+        const importedRankItems = itemsSnapshot.docs.map(docSnap => ({
+          id: docSnap.id,
+          ...docSnap.data()
+        } as ArenaRankPromptItem));
         const voters = new Set<string>();
 
         snapshot.forEach(docSnap => {
@@ -84,6 +128,7 @@ const AnalysisScreen: React.FC<AnalysisScreenProps> = ({ onBack, onGoToDashboard
           setError("该 Arena-rank 任务暂无排名结果。");
         } else {
           setRankVotes(importedRankVotes);
+          setRankItems(importedRankItems);
           setAggregatedData([]);
           setUniqueVoters(voters);
           setAnalysisMode('Arena-rank');
@@ -130,6 +175,7 @@ const AnalysisScreen: React.FC<AnalysisScreenProps> = ({ onBack, onGoToDashboard
       } else {
         setAggregatedData(Object.values(newAggregated));
         setRankVotes([]);
+        setRankItems([]);
         setUniqueVoters(voters);
         setAnalysisMode(selectedParadigm);
       }
@@ -140,7 +186,7 @@ const AnalysisScreen: React.FC<AnalysisScreenProps> = ({ onBack, onGoToDashboard
     }
   };
 
-  const parseRankingRow = (row: any, keys: string[]) => {
+  const parseRankingRow = (row: any, keys: string[]): RankingEntry[] => {
     const rankingJsonKey = keys.find(k => k.toLowerCase() === 'ranking_json' || k.toLowerCase() === 'ranking');
     if (rankingJsonKey && row[rankingJsonKey]) {
       try {
@@ -173,7 +219,7 @@ const AnalysisScreen: React.FC<AnalysisScreenProps> = ({ onBack, onGoToDashboard
         const modelId = idMatch?.[1] || modelName;
         return { modelId, modelName, rank: index + 1 };
       })
-      .filter(Boolean);
+      .filter((entry): entry is RankingEntry => Boolean(entry));
   };
   
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -184,6 +230,7 @@ const AnalysisScreen: React.FC<AnalysisScreenProps> = ({ onBack, onGoToDashboard
     setTotalFiles(files.length);
     const newAggregated: Record<string, AggregatedResult> = {};
     const newRankVotes: VoteRecord[] = [];
+    const newRankItemsById = new Map<string, ArenaRankPromptItem>();
     const voters = new Set<string>();
 
     let filesProcessed = 0;
@@ -208,10 +255,26 @@ const AnalysisScreen: React.FC<AnalysisScreenProps> = ({ onBack, onGoToDashboard
             const ranking = parseRankingRow(row, keys);
 
             if (itemId && ranking.length >= 3) {
+              const itemIdString = String(itemId);
+              const modelOutputs = buildModelOutputsFromRanking(row, keys, ranking);
               rankRowsFound++;
               voters.add(user);
+              const existingItem = newRankItemsById.get(itemIdString);
+              if (!existingItem) {
+                const item = { id: itemIdString, inputs: row, originalData: row } as ArenaRankPromptItem;
+                newRankItemsById.set(itemIdString, {
+                  ...item,
+                  prompt: resolveEvaluationItemPrompt(item),
+                  modelOutputs
+                });
+              } else if (modelOutputs.length > 0) {
+                newRankItemsById.set(itemIdString, {
+                  ...existingItem,
+                  modelOutputs: mergeModelOutputs(existingItem.modelOutputs, modelOutputs)
+                });
+              }
               newRankVotes.push({
-                itemId,
+                itemId: itemIdString,
                 ranking,
                 timestamp: Date.now(),
                 user
@@ -243,6 +306,7 @@ const AnalysisScreen: React.FC<AnalysisScreenProps> = ({ onBack, onGoToDashboard
           if (filesProcessed === files.length) {
             if (rankRowsFound > 0) {
               setRankVotes(newRankVotes);
+              setRankItems(Array.from(newRankItemsById.values()));
               setAggregatedData([]);
               setUniqueVoters(voters);
               setAnalysisMode('Arena-rank');
@@ -252,6 +316,7 @@ const AnalysisScreen: React.FC<AnalysisScreenProps> = ({ onBack, onGoToDashboard
             } else {
               setAggregatedData(Object.values(newAggregated));
               setRankVotes([]);
+              setRankItems([]);
               setUniqueVoters(voters);
               setAnalysisMode('Arena');
             }
@@ -311,6 +376,7 @@ const AnalysisScreen: React.FC<AnalysisScreenProps> = ({ onBack, onGoToDashboard
         if (isRankTemplate) {
           for (let i = 1; i <= Math.max(maxOutputs, 3); i++) {
             row[`rank_${i}`] = '';
+            row[`排名${i}视频链接`] = '';
           }
           row['ranking_json'] = '';
         } else {
@@ -350,7 +416,7 @@ const AnalysisScreen: React.FC<AnalysisScreenProps> = ({ onBack, onGoToDashboard
   const percentB = totalVotes ? Math.round((totalB / totalVotes) * 100) : 0;
   const isArenaRankAnalysis = analysisMode === 'Arena-rank';
   const rankModelStats = calculateArenaRankModelStats(rankVotes);
-  const rankCaseSummaries = calculateArenaRankCaseSummaries(rankVotes);
+  const rankCaseSummaries = calculateArenaRankCaseSummaries(rankVotes, rankItems);
 
   const escapeCsvField = (value: any) => `"${String(value ?? '').replace(/"/g, '""')}"`;
 
@@ -358,13 +424,25 @@ const AnalysisScreen: React.FC<AnalysisScreenProps> = ({ onBack, onGoToDashboard
     let csvContent = '';
 
     if (isArenaRankAnalysis) {
-      const headers = ['ItemID', 'Voters', 'ConsensusRanking', 'ModelStats'];
-      const rows = rankCaseSummaries.map(item => [
-        item.itemId,
-        item.voterCount,
-        item.ranking.map(entry => `#${entry.averageRank.toFixed(2)} ${entry.modelName}`).join(' | '),
-        item.ranking.map(entry => `${entry.modelName}: score=${entry.totalScore}, avgRank=${entry.averageRank.toFixed(2)}, first=${entry.firstPlaceCount}`).join(' | ')
-      ].map(escapeCsvField).join(','));
+      const maxSummaryRankCount = Math.max(0, ...rankCaseSummaries.map(item => item.ranking.length));
+      const rankVideoHeaders = Array.from({ length: maxSummaryRankCount }, (_, idx) => `排名${idx + 1}视频链接`);
+      const headers = ['ItemID', 'Prompt', 'Voters', 'ConsensusRanking', ...rankVideoHeaders, 'ModelStats'];
+      const rows = rankCaseSummaries.map(item => {
+        const sourceItem = rankItems.find(candidate => candidate.id === item.itemId);
+        const rankVideoValues = rankVideoHeaders.map((_, index) => {
+          const entry = item.ranking[index];
+          return entry ? getArenaRankModelOutputUrl(sourceItem, entry) : '';
+        });
+
+        return [
+          item.itemId,
+          item.prompt || '',
+          item.voterCount,
+          item.ranking.map(entry => `#${entry.averageRank.toFixed(2)} ${entry.modelName}`).join(' | '),
+          ...rankVideoValues,
+          item.ranking.map(entry => `${entry.modelName}: score=${entry.totalScore}, avgRank=${entry.averageRank.toFixed(2)}, first=${entry.firstPlaceCount}`).join(' | ')
+        ].map(escapeCsvField).join(',');
+      });
       csvContent = [headers.join(','), ...rows].join('\n');
     } else {
       const headers = ['ItemID', 'A', 'B', 'Tie', 'Voters'];
@@ -583,28 +661,34 @@ const AnalysisScreen: React.FC<AnalysisScreenProps> = ({ onBack, onGoToDashboard
                 <thead className="bg-white/5">
                   <tr>
                     <th className="p-4 text-xs font-semibold text-slate-400 uppercase border-b border-white/10">项目 ID</th>
+                    <th className="p-4 text-xs font-semibold text-slate-400 uppercase border-b border-white/10">Prompt</th>
                     <th className="p-4 text-xs font-semibold text-slate-400 uppercase border-b border-white/10">参与人数</th>
                     <th className="p-4 text-xs font-semibold text-slate-400 uppercase border-b border-white/10">共识排名</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {rankCaseSummaries.map((item) => (
-                    <tr key={item.itemId} className="border-b border-white/10 hover:bg-white/5">
-                      <td className="p-4 text-sm text-slate-300 font-mono">{item.itemId}</td>
-                      <td className="p-4 text-sm text-slate-200">{item.voterCount}</td>
-                      <td className="p-4">
-                        <div className="flex flex-wrap gap-2">
-                          {item.ranking.map((entry, index) => (
-                            <span key={entry.modelId} className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-white/10 text-slate-200 border border-white/10">
-                              <span className="text-amber-300">#{index + 1}</span>
-                              {entry.modelName}
-                              <span className="text-slate-400">avg {entry.averageRank.toFixed(2)}</span>
-                            </span>
-                          ))}
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
+                  {rankCaseSummaries.map((item) => {
+                    const sourceItem = rankItems.find(candidate => candidate.id === item.itemId);
+
+                    return (
+                      <tr key={item.itemId} className="border-b border-white/10 hover:bg-white/5">
+                        <td className="p-4 text-sm text-slate-300 font-mono">{item.itemId}</td>
+                        <td className="p-4 text-sm text-slate-300 min-w-[260px] max-w-md whitespace-pre-wrap break-words">{item.prompt || '-'}</td>
+                        <td className="p-4 text-sm text-slate-200">{item.voterCount}</td>
+                        <td className="p-4">
+                          <ArenaRankVideoPreviewList
+                            entries={item.ranking.map((entry, index) => ({
+                              id: entry.modelId,
+                              modelName: entry.modelName,
+                              rankLabel: `#${index + 1}`,
+                              metaLabel: `avg ${entry.averageRank.toFixed(2)}`,
+                              videoUrl: getArenaRankModelOutputUrl(sourceItem, entry)
+                            }))}
+                          />
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

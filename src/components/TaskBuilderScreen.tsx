@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { ArrowLeft, Plus, Save, Trash2, Database, LayoutTemplate, Box, CheckCircle2, Play, Link as LinkIcon, Upload, X, Users, Edit, Eye, Loader2, ClipboardList } from 'lucide-react';
 import { EvalDataset, EvalTemplate, EvalTask, EvalDimension, EvalParadigm, EvaluationItem } from '../types';
 import { db, auth } from '../firebase';
-import { collection, onSnapshot, addDoc, serverTimestamp, query, orderBy, doc, updateDoc, deleteDoc, where, setDoc, getDocs } from 'firebase/firestore';
+import { collection, onSnapshot, addDoc, query, orderBy, doc, updateDoc, deleteDoc, where, setDoc, getDocs } from '../localPlatform';
 import { ConfirmModal } from './ConfirmModal';
 import Papa from 'papaparse';
 import MediaRenderer from './MediaRenderer';
@@ -65,8 +65,6 @@ export default function TaskBuilderScreen({ projectId, onBack, initialMode = 'cr
   }, [projectId]);
 
   useEffect(() => {
-    if (!auth.currentUser) return;
-
     // Filter tasks by projectId if provided
     const tasksRef = collection(db, 'evalTasks');
     const tasksQuery = projectId 
@@ -144,7 +142,7 @@ export default function TaskBuilderScreen({ projectId, onBack, initialMode = 'cr
   };
 
   const handleCreateTask = async () => {
-    if (!auth.currentUser || isSubmitting) return;
+    if (isSubmitting) return;
     
     const validationError = validateSetup();
     if (validationError) {
@@ -571,7 +569,7 @@ export default function TaskBuilderScreen({ projectId, onBack, initialMode = 'cr
   };
 
   const handleQuickCreateTemplate = async () => {
-    if (!newTemplateName.trim() || !auth.currentUser) return;
+    if (!newTemplateName.trim()) return;
 
     let defaultDimensions: EvalDimension[] = [];
     if (newTemplateParadigm === 'GSB') {

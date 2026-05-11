@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { ArrowDown, ArrowLeft, ArrowUp, CheckCircle2, Cloud, GripVertical, Trophy } from 'lucide-react';
 import { EvaluationItem, RankingEntry } from '../types';
 import { getModelOutputsForItem } from '../rankingUtils';
@@ -90,6 +90,13 @@ const ArenaRankVotingScreen: React.FC<ArenaRankVotingScreenProps> = ({
       return next;
     });
   };
+
+  const handleLoadStatusChange = useCallback((modelId: string, isLoaded: boolean) => {
+    setLoaded(prev => {
+      if (prev[modelId] === isLoaded) return prev;
+      return { ...prev, [modelId]: isLoaded };
+    });
+  }, []);
 
   const handleDrop = (targetId: string) => {
     if (!draggedId || draggedId === targetId) return;
@@ -231,7 +238,7 @@ const ArenaRankVotingScreen: React.FC<ArenaRankVotingScreenProps> = ({
                       label={`Option ${index + 1}`}
                       isActive={true}
                       forceType={item.type}
-                      onLoadStatusChange={(isLoaded) => setLoaded(prev => ({ ...prev, [output.modelId]: isLoaded }))}
+                      onLoadStatusChange={(isLoaded) => handleLoadStatusChange(output.modelId, isLoaded)}
                     />
                   </div>
                 </div>

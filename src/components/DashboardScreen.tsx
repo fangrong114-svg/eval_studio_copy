@@ -3,8 +3,7 @@ import { Layers, Plus, Search, Filter, Calendar, Users, BarChart2, ArrowRight, A
 import { EvalParadigm, EvaluationProject, EvaluationStep, EvaluationItem, EvalTask } from '../types';
 import { CreateProjectModal } from './CreateProjectModal';
 import { db, auth, signInWithGoogle, logout } from '../firebase';
-import { collection, onSnapshot, addDoc, serverTimestamp, query, orderBy, doc, updateDoc, where, getDocs, getDoc, setDoc, deleteDoc } from 'firebase/firestore';
-import { onAuthStateChanged } from 'firebase/auth';
+import { collection, onSnapshot, addDoc, query, orderBy, doc, updateDoc, where, getDocs, getDoc, setDoc, deleteDoc } from '../localPlatform';
 
 interface DashboardScreenProps {
   initialProject?: EvaluationProject | null;
@@ -22,7 +21,7 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({ initialProject
   const [selectedProject, setSelectedProject] = useState<EvaluationProject | null>(initialProject || null);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [editingStep, setEditingStep] = useState<{projectId: string, step: EvaluationStep} | null>(null);
-  const [user, setUser] = useState<any>(null);
+  const [user] = useState<any>(auth.currentUser);
   const [loading, setLoading] = useState(true);
   const [projectTasks, setProjectTasks] = useState<any[]>([]);
   const [datasets, setDatasets] = useState<any[]>([]);
@@ -66,17 +65,6 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({ initialProject
       unsubscribeTemplates();
     };
   }, [selectedProject?.id]);
-
-  useEffect(() => {
-    const unsubscribeAuth = onAuthStateChanged(auth, (currentUser) => {
-      setUser(currentUser);
-      if (!currentUser) {
-        setProjects([]);
-        setLoading(false);
-      }
-    });
-    return () => unsubscribeAuth();
-  }, []);
 
   useEffect(() => {
     if (!user) return;
@@ -168,11 +156,6 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({ initialProject
   };
 
   const handleUpdateStepStatus = async (projectId: string, stepId: number, currentStatus: string) => {
-    if (!user) {
-      alert("请先登录");
-      return;
-    }
-    
     const project = projects.find(p => p.id === projectId);
     if (!project) return;
 

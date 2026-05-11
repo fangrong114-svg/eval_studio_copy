@@ -3,7 +3,7 @@ import { Database, Plus, Download, Upload, FileText, Settings, ArrowRight, Trash
 import Papa from 'papaparse';
 import { EvalDataset, DatasetSchemaField, SchemaFieldType } from '../types';
 import { db, auth } from '../firebase';
-import { collection, doc, setDoc, onSnapshot, query, orderBy, deleteDoc } from 'firebase/firestore';
+import { collection, doc, setDoc, onSnapshot, query, orderBy, deleteDoc } from '../localPlatform';
 import { ConfirmModal } from './ConfirmModal';
 
 interface DatasetRepositoryScreenProps {
@@ -27,8 +27,6 @@ const DatasetRepositoryScreen: React.FC<DatasetRepositoryScreenProps> = ({ onBac
   ]);
 
   useEffect(() => {
-    if (!auth.currentUser) return;
-    
     const q = query(collection(db, 'evalDatasets'), orderBy('createdAt', 'desc'));
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const loadedDatasets: EvalDataset[] = [];
@@ -70,7 +68,7 @@ const DatasetRepositoryScreen: React.FC<DatasetRepositoryScreenProps> = ({ onBac
   };
 
   const handleCreateDataset = async () => {
-    if (!newName.trim() || !auth.currentUser) return;
+    if (!newName.trim()) return;
     
     const newDataset: EvalDataset = {
       id: `ds-${Date.now()}`,

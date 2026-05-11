@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { LayoutTemplate, Plus, Settings, ArrowRight, Trash2, Edit2, FileText, CheckCircle2 } from 'lucide-react';
 import { EvalTemplate, EvalDimension, EvalParadigm } from '../types';
 import { db, auth } from '../firebase';
-import { collection, doc, setDoc, onSnapshot, query, orderBy, deleteDoc } from 'firebase/firestore';
+import { collection, doc, setDoc, onSnapshot, query, orderBy, deleteDoc } from '../localPlatform';
 import { ConfirmModal } from './ConfirmModal';
 
 interface TemplateRepositoryScreenProps {
@@ -24,8 +24,6 @@ const TemplateRepositoryScreen: React.FC<TemplateRepositoryScreenProps> = ({ onB
   ]);
 
   useEffect(() => {
-    if (!auth.currentUser) return;
-    
     const q = query(collection(db, 'evalTemplates'), orderBy('createdAt', 'desc'));
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const loadedTemplates: EvalTemplate[] = [];
@@ -79,7 +77,7 @@ const TemplateRepositoryScreen: React.FC<TemplateRepositoryScreenProps> = ({ onB
   };
 
   const handleSaveTemplate = async () => {
-    if (!newName.trim() || !auth.currentUser) return;
+    if (!newName.trim()) return;
 
     const templateId = editingTemplateId || `tpl-${Date.now()}`;
     const templateData: EvalTemplate = {

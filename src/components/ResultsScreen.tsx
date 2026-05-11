@@ -1,7 +1,8 @@
 import React from 'react';
 import { Download, RotateCcw, Trophy, Check } from 'lucide-react';
 import { EvalParadigm, VoteRecord, EvaluationItem, VotingStats } from '../types';
-import { calculateArenaRankModelStats, getBordaScore, isArenaRankVote, sortRanking } from '../rankingUtils';
+import { calculateArenaRankModelStats, getArenaRankModelOutputUrl, getBordaScore, isArenaRankVote, resolveEvaluationItemPrompt, sortRanking } from '../rankingUtils';
+import ArenaRankVideoPreviewList from './ArenaRankVideoPreviewList';
 
 interface ResultsScreenProps {
   votes: VoteRecord[];
@@ -20,6 +21,9 @@ const ResultsScreen: React.FC<ResultsScreenProps> = ({ votes, items, onReset, us
   const isArenaRank = paradigm === 'Arena-rank';
   const rankVotes = votes.filter(isArenaRankVote);
   const rankStats = calculateArenaRankModelStats(rankVotes);
+  const arenaRankModelList = models.length > 0
+    ? models
+    : rankStats.map(stat => ({ id: stat.modelId, name: stat.modelName }));
   const maxRankCount = Math.max(0, ...rankVotes.map(v => v.ranking?.length || 0));
 
   // Calculate Stats
@@ -40,19 +44,22 @@ const ResultsScreen: React.FC<ResultsScreenProps> = ({ votes, items, onReset, us
 
   const downloadCSV = () => {
     if (isArenaRank) {
-      const modelList = models.length > 0
-        ? models
-        : rankStats.map(stat => ({ id: stat.modelId, name: stat.modelName }));
       const rankHeaders = Array.from({ length: maxRankCount }, (_, idx) => `rank_${idx + 1}`);
-      const modelHeaders = modelList.flatMap(model => [`${model.name}_rank`, `${model.name}_score`]);
-      const headers = ['ItemID', 'Timestamp', 'User', ...rankHeaders, ...modelHeaders, 'ranking_json'];
+      const rankVideoHeaders = Array.from({ length: maxRankCount }, (_, idx) => `排名${idx + 1}视频链接`);
+      const modelHeaders = arenaRankModelList.flatMap(model => [`${model.name}_rank`, `${model.name}_score`]);
+      const headers = ['ItemID', 'Prompt', 'Timestamp', 'User', ...rankHeaders, ...rankVideoHeaders, ...modelHeaders, 'ranking_json'];
       const rows = rankVotes.map(v => {
+        const item = items.find(candidate => candidate.id === v.itemId);
         const ranking = sortRanking(v.ranking);
         const rankValues = rankHeaders.map((_, idx) => {
           const entry = ranking[idx];
           return entry ? `${entry.modelName} (${entry.modelId})` : '';
         });
-        const modelValues = modelList.flatMap(model => {
+        const rankVideoValues = rankHeaders.map((_, idx) => {
+          const entry = ranking[idx];
+          return entry ? getArenaRankModelOutputUrl(item, entry, arenaRankModelList) : '';
+        });
+        const modelValues = arenaRankModelList.flatMap(model => {
           const entry = ranking.find(candidate => candidate.modelId === model.id);
           return [
             entry?.rank || '',
@@ -61,9 +68,11 @@ const ResultsScreen: React.FC<ResultsScreenProps> = ({ votes, items, onReset, us
         });
         return [
           v.itemId,
+          resolveEvaluationItemPrompt(item),
           new Date(v.timestamp).toISOString(),
           userName || v.user || 'Anonymous',
           ...rankValues,
+          ...rankVideoValues,
           ...modelValues,
           JSON.stringify(ranking)
         ].map(escapeCsvField).join(',');
@@ -165,27 +174,35 @@ const ResultsScreen: React.FC<ResultsScreenProps> = ({ votes, items, onReset, us
               <thead className="bg-white/5 sticky top-0">
                 <tr>
                   <th className="p-4 text-xs font-semibold text-slate-300 uppercase border-b border-white/10">ID</th>
+                  <th className="p-4 text-xs font-semibold text-slate-300 uppercase border-b border-white/10">Prompt</th>
                   <th className="p-4 text-xs font-semibold text-slate-300 uppercase border-b border-white/10">实际排名</th>
                   <th className="p-4 text-xs font-semibold text-slate-300 uppercase border-b border-white/10 text-right">时间</th>
                 </tr>
               </thead>
               <tbody>
-                {rankVotes.map((v, i) => (
-                  <tr key={i} className="border-b border-white/10 glass-panel-hover">
-                    <td className="p-4 text-sm text-slate-200 font-mono">{v.itemId}</td>
-                    <td className="p-4">
-                      <div className="flex flex-wrap gap-2">
-                        {sortRanking(v.ranking).map(entry => (
-                          <span key={entry.modelId} className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-white/10 text-slate-200 border border-white/10">
-                            <span className="text-amber-300">#{entry.rank}</span>
-                            {entry.modelName}
-                          </span>
-                        ))}
-                      </div>
-                    </td>
-                    <td className="p-4 text-sm text-slate-200 text-right">{new Date(v.timestamp).toLocaleTimeString()}</td>
-                  </tr>
-                ))}
+                {rankVotes.map((v, i) => {
+                  const item = items.find(candidate => candidate.id === v.itemId);
+                  const prompt = resolveEvaluationItemPrompt(item);
+                  const ranking = sortRanking(v.ranking);
+
+                  return (
+                    <tr key={i} className="border-b border-white/10 glass-panel-hover">
+                      <td className="p-4 text-sm text-slate-200 font-mono">{v.itemId}</td>
+                      <td className="p-4 text-sm text-slate-300 min-w-[260px] max-w-md whitespace-pre-wrap break-words">{prompt || '-'}</td>
+                      <td className="p-4">
+                        <ArenaRankVideoPreviewList
+                          entries={ranking.map(entry => ({
+                            id: entry.modelId,
+                            modelName: entry.modelName,
+                            rankLabel: `#${entry.rank}`,
+                            videoUrl: getArenaRankModelOutputUrl(item, entry, arenaRankModelList)
+                          }))}
+                        />
+                      </td>
+                      <td className="p-4 text-sm text-slate-200 text-right">{new Date(v.timestamp).toLocaleTimeString()}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

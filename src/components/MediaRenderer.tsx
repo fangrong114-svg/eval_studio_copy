@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { AlertCircle, FileVideo, Image as ImageIcon, Loader2 } from 'lucide-react';
 import { VIDEO_EXTENSIONS } from '../constants';
 import { normalizeUrl } from '../utils';
@@ -10,21 +10,30 @@ interface MediaRendererProps {
   className?: string;
   onLoadStatusChange?: (isLoaded: boolean) => void;
   forceType?: 'image' | 'video' | string;
+  videoPreload?: 'none' | 'metadata' | 'auto';
 }
 
-const MediaRenderer: React.FC<MediaRendererProps> = ({ url, label, isActive, className = '', onLoadStatusChange, forceType }) => {
+const MediaRenderer: React.FC<MediaRendererProps> = ({ url, label, isActive, className = '', onLoadStatusChange, forceType, videoPreload = 'auto' }) => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
   const [mediaType, setMediaType] = useState<'image' | 'video'>('image');
 
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
+  const onLoadStatusChangeRef = useRef(onLoadStatusChange);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [retryKey, setRetryKey] = useState(0);
+  const finalUrl = normalizeUrl(url);
+
+  useEffect(() => {
+    onLoadStatusChangeRef.current = onLoadStatusChange;
+  }, [onLoadStatusChange]);
 
   // Simple heuristic to detect type from URL extension
   useEffect(() => {
     setLoading(true);
     setError(false);
     setBlobUrl(null); // Reset blob url on new url
-    onLoadStatusChange?.(false);
+    onLoadStatusChangeRef.current?.(false);
     
     // Reset based on URL change
     const cleanUrl = url.trim().split('?')[0].split('#')[0].toLowerCase();
@@ -49,7 +58,7 @@ const MediaRenderer: React.FC<MediaRendererProps> = ({ url, label, isActive, cla
     }
 
     setMediaType('image');
-  }, [url, onLoadStatusChange, forceType]);
+  }, [url, forceType]);
 
   // Cleanup blob URL when url changes or component unmounts
   useEffect(() => {
@@ -63,9 +72,34 @@ const MediaRenderer: React.FC<MediaRendererProps> = ({ url, label, isActive, cla
   const handleLoad = () => {
     setLoading(false);
     setError(false);
-    onLoadStatusChange?.(true);
+    onLoadStatusChangeRef.current?.(true);
   };
   const [errorStatus, setErrorStatus] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (mediaType !== 'video' || error) return;
+
+    const markLoadedIfReady = () => {
+      const video = videoRef.current;
+      if (video && video.readyState >= HTMLMediaElement.HAVE_METADATA) {
+        handleLoad();
+      }
+    };
+
+    const checks = [250, 1000, 3000].map(delay => window.setTimeout(markLoadedIfReady, delay));
+    const softTimeout = window.setTimeout(() => {
+      // Some CDNs/browsers allow manual playback but never fire canplay/loadeddata
+      // in embedded contexts. Do not block voting forever in that state.
+      handleLoad();
+    }, 10000);
+
+    markLoadedIfReady();
+
+    return () => {
+      checks.forEach(window.clearTimeout);
+      window.clearTimeout(softTimeout);
+    };
+  }, [mediaType, finalUrl, blobUrl, retryKey, error]);
 
   const handleError = async () => {
     // If it's a video and we haven't tried blob fallback yet, try fetching it directly.
@@ -89,7 +123,7 @@ const MediaRenderer: React.FC<MediaRendererProps> = ({ url, label, isActive, cla
 
     setLoading(false);
     setError(true);
-    onLoadStatusChange?.(true); // Treat error as loaded so user can still vote if it fails
+    onLoadStatusChangeRef.current?.(true); // Treat error as loaded so user can still vote if it fails
   };
 
   const handleRetry = () => {
@@ -103,8 +137,6 @@ const MediaRenderer: React.FC<MediaRendererProps> = ({ url, label, isActive, cla
     // To force re-render of the media element, we can use a key.
   };
 
-  const [retryKey, setRetryKey] = useState(0);
-
   const triggerRetry = () => {
     setLoading(true);
     setError(false);
@@ -112,8 +144,6 @@ const MediaRenderer: React.FC<MediaRendererProps> = ({ url, label, isActive, cla
     setBlobUrl(null);
     setRetryKey(prev => prev + 1);
   };
-
-  const finalUrl = normalizeUrl(url);
 
   if (!finalUrl) {
     return (
@@ -189,16 +219,21 @@ const MediaRenderer: React.FC<MediaRendererProps> = ({ url, label, isActive, cla
         {mediaType === 'video' ? (
           <video
             key={`video-${retryKey}-${blobUrl ? 'blob' : 'url'}`}
+            ref={videoRef}
             src={blobUrl || finalUrl || undefined}
             className={`max-w-full max-h-full object-contain focus:outline-none ${loading ? 'opacity-0' : 'opacity-100'}`}
             controls
             autoPlay={isActive}
             loop
             muted
+            preload={videoPreload}
             playsInline // Critical for iOS/Mobile to prevent detached player refresh issues
             referrerPolicy="origin"
-            crossOrigin="anonymous"
+            onLoadedMetadata={handleLoad}
             onLoadedData={handleLoad}
+            onCanPlay={handleLoad}
+            onCanPlayThrough={handleLoad}
+            onPlaying={handleLoad}
             onError={handleError}
             onKeyDown={(e) => e.stopPropagation()} // Prevent video shortcuts from interfering with app voting
           />
@@ -209,7 +244,6 @@ const MediaRenderer: React.FC<MediaRendererProps> = ({ url, label, isActive, cla
             alt={label}
             className={`max-w-full max-h-full object-contain ${loading ? 'opacity-0' : 'opacity-100'}`}
             referrerPolicy="origin"
-            crossOrigin="anonymous"
             onLoad={handleLoad}
             onError={handleError}
           />
