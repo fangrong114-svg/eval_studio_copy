@@ -25,7 +25,18 @@ if (shouldUseFirebase) {
 } else {
   db = localDb;
   auth = {
-    currentUser: localUser
+    currentUser: localUser,
+    onAuthStateChanged: (callback: (user: typeof localUser | null) => void) => {
+      try {
+        callback(localUser);
+      } catch (error) {
+        console.error('Local auth onAuthStateChanged callback failed', error);
+      }
+      return () => {};
+    },
+    signOut: async () => {
+      console.info('Local test mode keeps the Local Tester account signed in.');
+    }
   };
   googleProvider = null;
 }

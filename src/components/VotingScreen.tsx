@@ -345,7 +345,7 @@ const VotingScreen: React.FC<VotingScreenProps> = ({
                       }}
                       className="w-16 h-16 rounded-xl border-2 border-blue-400/50 bg-white/5 shadow-md shadow-black/20 overflow-hidden hover:border-blue-400 transition-all flex items-center justify-center relative"
                     >
-                      <img src={effectiveStartImageUrl} className="w-full h-full object-cover opacity-80 group-hover:opacity-100" referrerPolicy="origin" />
+                      <img src={effectiveStartImageUrl} className="w-full h-full object-cover opacity-80 group-hover:opacity-100" referrerPolicy="no-referrer" />
                       <div className="absolute inset-0 bg-black/40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
                         <Expand size={16} className="text-white" />
                       </div>
@@ -365,7 +365,7 @@ const VotingScreen: React.FC<VotingScreenProps> = ({
                       }}
                       className="w-16 h-16 rounded-xl border-2 border-white/10 bg-white/5 shadow-md shadow-black/20 overflow-hidden hover:border-blue-400 transition-all flex items-center justify-center relative"
                     >
-                      <img src={effectiveReferenceUrls![0] || undefined} className="w-full h-full object-cover opacity-80 group-hover:opacity-100" referrerPolicy="origin" />
+                      <img src={effectiveReferenceUrls![0] || undefined} className="w-full h-full object-cover opacity-80 group-hover:opacity-100" referrerPolicy="no-referrer" />
                       <div className="absolute inset-0 bg-black/40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
                         <Expand size={16} className="text-white" />
                       </div>

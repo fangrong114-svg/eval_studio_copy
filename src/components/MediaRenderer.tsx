@@ -13,6 +13,15 @@ interface MediaRendererProps {
   videoPreload?: 'none' | 'metadata' | 'auto';
 }
 
+// Some CDNs reject the request based on the Referer header (hotlink protection).
+// On Firebase Hosting (or any non-localhost deploy) the page origin gets sent as
+// Referer with the default "origin" policy and the CDN returns 403. We try a
+// sequence of referrer policies and only show an error if all of them fail.
+// Order matters: most "anti-leech" rules allow empty referer (direct link
+// scenario), so `no-referrer` is tried first.
+const REFERRER_POLICY_FALLBACKS = ['no-referrer', 'origin', 'unsafe-url'] as const;
+type ReferrerPolicyOption = typeof REFERRER_POLICY_FALLBACKS[number];
+
 const MediaRenderer: React.FC<MediaRendererProps> = ({ url, label, isActive, className = '', onLoadStatusChange, forceType, videoPreload = 'auto' }) => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
@@ -22,6 +31,8 @@ const MediaRenderer: React.FC<MediaRendererProps> = ({ url, label, isActive, cla
   const onLoadStatusChangeRef = useRef(onLoadStatusChange);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [retryKey, setRetryKey] = useState(0);
+  const [referrerPolicyIdx, setReferrerPolicyIdx] = useState(0);
+  const referrerPolicy: ReferrerPolicyOption = REFERRER_POLICY_FALLBACKS[referrerPolicyIdx];
   const finalUrl = normalizeUrl(url);
 
   useEffect(() => {
@@ -33,6 +44,7 @@ const MediaRenderer: React.FC<MediaRendererProps> = ({ url, label, isActive, cla
     setLoading(true);
     setError(false);
     setBlobUrl(null); // Reset blob url on new url
+    setReferrerPolicyIdx(0); // Restart referrer policy fallback chain on new url
     onLoadStatusChangeRef.current?.(false);
     
     // Reset based on URL change
@@ -102,8 +114,19 @@ const MediaRenderer: React.FC<MediaRendererProps> = ({ url, label, isActive, cla
   }, [mediaType, finalUrl, blobUrl, retryKey, error]);
 
   const handleError = () => {
+    // Try the next referrer policy before giving up. This handles CDN hotlink
+    // protection differences between local dev (often allowed) and deployed
+    // origins (e.g. Firebase Hosting domains not in the CDN whitelist).
+    if (referrerPolicyIdx < REFERRER_POLICY_FALLBACKS.length - 1) {
+      setReferrerPolicyIdx(prev => prev + 1);
+      setLoading(true);
+      setError(false);
+      setRetryKey(prev => prev + 1);
+      return;
+    }
     setLoading(false);
     setError(true);
+    setErrorStatus(403); // Most likely cause after exhausting all referrer policies
     onLoadStatusChangeRef.current?.(true); // Treat error as loaded so user can still vote if it fails
   };
 
@@ -123,6 +146,7 @@ const MediaRenderer: React.FC<MediaRendererProps> = ({ url, label, isActive, cla
     setError(false);
     setErrorStatus(null);
     setBlobUrl(null);
+    setReferrerPolicyIdx(0);
     setRetryKey(prev => prev + 1);
   };
 
@@ -156,11 +180,11 @@ const MediaRenderer: React.FC<MediaRendererProps> = ({ url, label, isActive, cla
         <div className="absolute inset-0 flex flex-col items-center justify-center bg-white/5 text-slate-400 p-4 text-center overflow-y-auto z-10">
           <AlertCircle className="w-10 h-10 mb-2 text-red-400 shrink-0" />
           <p className="text-sm font-medium text-slate-300">
-            {errorStatus === 403 ? '403 Forbidden (CDN 拒绝访问)' : ((url.match(/https?:\/\//g) || []).length > 1 ? '检测到多个链接合并' : '加载失败')}
+            {errorStatus === 403 ? '加载失败（CDN 可能拒绝访问）' : ((url.match(/https?:\/\//g) || []).length > 1 ? '检测到多个链接合并' : '加载失败')}
           </p>
           <p className="text-xs text-slate-500 mt-1 break-all max-w-full px-4 select-all">
             {errorStatus === 403 
-              ? 'CDN 拒绝了来自此域名的请求。这通常是由于防盗链设置导致的。请尝试在 CDN 后台允许此域名，或将 Referrer 策略设置为允许空 Referrer。'
+              ? '已自动尝试 no-referrer / origin / unsafe-url 三种 Referrer 策略仍失败。常见原因：CDN 防盗链未放行当前部署域名 / 链接已签名过期 / 跨域被拒。请联系 CDN 管理员把当前域名加入白名单，或在新标签页打开链接确认资源仍可访问。'
               : ((url.match(/https?:\/\//g) || []).length > 1 
                 ? '您的表格解析失败，导致多个列的内容被合并到了一个链接中。请检查上传文件的分隔符（建议使用逗号或制表符）。'
                 : (finalUrl ? `尝试加载的链接: ${finalUrl}` : '链接为空'))}
@@ -199,7 +223,7 @@ const MediaRenderer: React.FC<MediaRendererProps> = ({ url, label, isActive, cla
       <div className="flex-1 relative flex items-center justify-center bg-black/60">
         {mediaType === 'video' ? (
           <video
-            key={`video-${retryKey}-${blobUrl ? 'blob' : 'url'}`}
+            key={`video-${retryKey}-${referrerPolicyIdx}-${blobUrl ? 'blob' : 'url'}`}
             ref={videoRef}
             src={blobUrl || finalUrl || undefined}
             className={`max-w-full max-h-full object-contain focus:outline-none ${loading ? 'opacity-0' : 'opacity-100'}`}
@@ -209,7 +233,7 @@ const MediaRenderer: React.FC<MediaRendererProps> = ({ url, label, isActive, cla
             muted
             preload={videoPreload}
             playsInline // Critical for iOS/Mobile to prevent detached player refresh issues
-            referrerPolicy="origin"
+            referrerPolicy={referrerPolicy}
             onLoadedMetadata={handleLoad}
             onLoadedData={handleLoad}
             onCanPlay={handleLoad}
@@ -220,11 +244,11 @@ const MediaRenderer: React.FC<MediaRendererProps> = ({ url, label, isActive, cla
           />
         ) : (
           <img
-            key={`img-${retryKey}`}
+            key={`img-${retryKey}-${referrerPolicyIdx}`}
             src={finalUrl || undefined}
             alt={label}
             className={`max-w-full max-h-full object-contain ${loading ? 'opacity-0' : 'opacity-100'}`}
-            referrerPolicy="origin"
+            referrerPolicy={referrerPolicy}
             onLoad={handleLoad}
             onError={handleError}
           />
