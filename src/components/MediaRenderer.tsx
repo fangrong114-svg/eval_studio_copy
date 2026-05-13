@@ -101,26 +101,7 @@ const MediaRenderer: React.FC<MediaRendererProps> = ({ url, label, isActive, cla
     };
   }, [mediaType, finalUrl, blobUrl, retryKey, error]);
 
-  const handleError = async () => {
-    // If it's a video and we haven't tried blob fallback yet, try fetching it directly.
-    // This bypasses issues where CDNs serve videos with 'content-encoding: br' which breaks the <video> tag.
-    if (mediaType === 'video' && !blobUrl && finalUrl && !finalUrl.startsWith('data:') && !finalUrl.startsWith('blob:')) {
-      try {
-        const response = await fetch(finalUrl);
-        if (response.ok) {
-          const blob = await response.blob();
-          const objectUrl = URL.createObjectURL(blob);
-          setBlobUrl(objectUrl);
-          // Don't set error yet, let the video try to load the blob
-          return;
-        } else {
-          setErrorStatus(response.status);
-        }
-      } catch (e) {
-        console.error("Blob fetch fallback failed", e);
-      }
-    }
-
+  const handleError = () => {
     setLoading(false);
     setError(true);
     onLoadStatusChangeRef.current?.(true); // Treat error as loaded so user can still vote if it fails

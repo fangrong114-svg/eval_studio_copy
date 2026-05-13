@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect } from 'react';
 import { Layers, ChevronRight } from 'lucide-react';
 import SetupScreen from './SetupScreen';
@@ -12,7 +13,7 @@ import TemplateRepositoryScreen from './TemplateRepositoryScreen';
 import TaskBuilderScreen from './TaskBuilderScreen';
 import { ConfirmModal } from './ConfirmModal';
 import { AppState, EvalParadigm, EvaluationItem, HistorySession, RankingEntry, VoteRecord, VoteType, EvaluationProject } from '../types';
-import { auth } from '../firebase';
+import { auth, signInWithGoogle, logout } from '../firebase';
 
 const STORAGE_KEY = 'modeleval_session';
 const HISTORY_KEY = 'modeleval_history';
@@ -35,6 +36,7 @@ export function ModelEvalApp({ initialRoute = 'dashboard' }: ModelEvalAppProps) 
   const [taskParadigm, setTaskParadigm] = useState<EvalParadigm>('Arena');
   const [hasSavedSession, setHasSavedSession] = useState(false);
   const [sessionId, setSessionId] = useState<string>('');
+  const [user, setUser] = useState(null);
   
   // History State
   const [history, setHistory] = useState<HistorySession[]>([]);
@@ -54,6 +56,16 @@ export function ModelEvalApp({ initialRoute = 'dashboard' }: ModelEvalAppProps) 
     message: '',
     onConfirm: () => {},
   });
+
+  useEffect(() => {
+    const unsubscribe = auth.onAuthStateChanged(user => {
+      setUser(user);
+      if (user) {
+        setUserName(user.email);
+      }
+    });
+    return () => unsubscribe();
+  }, []);
 
   // Update state if initialRoute changes
   useEffect(() => {
@@ -385,10 +397,38 @@ export function ModelEvalApp({ initialRoute = 'dashboard' }: ModelEvalAppProps) 
     });
   };
 
+  if (!user && process.env.NODE_ENV === 'production') {
+    return (
+      <div className="h-screen flex items-center justify-center bg-gray-100">
+        <div className="text-center">
+          <h1 className="text-2xl font-bold mb-4">Welcome to ModelEval</h1>
+          <p className="mb-6">Please sign in to continue.</p>
+          <button
+            onClick={signInWithGoogle}
+            className="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded"
+          >
+            Sign in with Google
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="h-[calc(100vh-64px)] overflow-auto bg-bg-base text-text-primary font-sans selection:bg-amber-500/30">
       {/* Main Container */}
       <div className="h-full">
+      {user && process.env.NODE_ENV === 'production' && (
+          <div className="absolute top-4 right-4 flex items-center">
+            <span className="mr-4">Welcome, {user.displayName}</span>
+            <button
+              onClick={logout}
+              className="bg-red-500 hover:bg-red-700 text-white font-bold py-2 px-4 rounded"
+            >
+              Logout
+            </button>
+          </div>
+        )}
         {appState === 'dashboard' && (
           <div className="h-full py-10">
             <DashboardScreen 

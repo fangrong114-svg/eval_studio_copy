@@ -1,12 +1,60 @@
+
+import { initializeApp } from 'firebase/app';
+import { getAuth, GoogleAuthProvider, signInWithPopup, signOut } from 'firebase/auth';
+import { getFirestore } from 'firebase/firestore';
 import { localDb, localUser } from './localPlatform';
 
-export const db = localDb;
-
-export const auth = {
-  currentUser: localUser
+const firebaseConfig = {
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+  appId: import.meta.env.VITE_FIREBASE_APP_ID
 };
 
-export const googleProvider = null;
+const shouldUseFirebase = process.env.NODE_ENV === 'production';
+
+let db, auth, googleProvider;
+
+if (shouldUseFirebase) {
+  const app = initializeApp(firebaseConfig);
+  db = getFirestore(app);
+  auth = getAuth(app);
+  googleProvider = new GoogleAuthProvider();
+} else {
+  db = localDb;
+  auth = {
+    currentUser: localUser
+  };
+  googleProvider = null;
+}
+
+export { db, auth, googleProvider };
+
+export const signInWithGoogle = async () => {
+  if (shouldUseFirebase) {
+    try {
+      await signInWithPopup(auth, googleProvider);
+    } catch (error) {
+      console.error("Error signing in with Google: ", error);
+    }
+  } else {
+    console.info('Local test mode uses the built-in Local Tester account.');
+  }
+};
+
+export const logout = async () => {
+  if (shouldUseFirebase) {
+    try {
+      await signOut(auth);
+    } catch (error) {
+      console.error("Error signing out: ", error);
+    }
+  } else {
+    console.info('Local test mode keeps the Local Tester account signed in.');
+  }
+};
 
 export interface FirestoreErrorInfo {
   error: string;
@@ -40,15 +88,7 @@ export const handleFirestoreError = (
     }
   };
 
-  console.error('Local platform operation failed', errorInfo);
+  console.error('Firestore operation failed', errorInfo);
   throw error;
-};
-
-export const signInWithGoogle = async () => {
-  console.info('Local test mode uses the built-in Local Tester account.');
-};
-
-export const logout = async () => {
-  console.info('Local test mode keeps the Local Tester account signed in.');
 };
 
