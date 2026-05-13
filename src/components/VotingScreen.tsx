@@ -153,6 +153,7 @@ const VotingScreen: React.FC<VotingScreenProps> = ({
         if (isVideo) {
           const video = document.createElement('video');
           video.preload = 'auto';
+          video.referrerPolicy = 'no-referrer';
           video.src = normalizedUrl;
         } else {
           const img = new Image();
