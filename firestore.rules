@@ -43,16 +43,16 @@ service cloud.firestore {
       return data.keys().hasAll(['name', 'initiatorUid', 'createdAt', 'lastUpdated']) &&
              data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
              data.initiatorUid == request.auth.uid &&
-             data.createdAt == request.time &&
-             data.lastUpdated == request.time;
+             data.createdAt is int &&
+             data.lastUpdated is int;
     }
 
     function isValidDataset(data) {
       return data.keys().hasAll(['name', 'creatorUid', 'createdAt', 'updatedAt']) &&
              data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
              data.creatorUid == request.auth.uid &&
-             data.createdAt == request.time &&
-             data.updatedAt == request.time;
+             data.createdAt is int &&
+             data.updatedAt is int;
     }
 
     function isValidTemplate(data) {
@@ -60,7 +60,7 @@ service cloud.firestore {
              data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
              data.paradigm in ['GSB', 'MOS', 'Arena', 'Arena-rank'] &&
              data.creatorUid == request.auth.uid &&
-             data.createdAt == request.time;
+             data.createdAt is int;
     }
 
     function isValidTask(data) {
@@ -70,7 +70,7 @@ service cloud.firestore {
              data.templateId is string &&
              data.status in ['draft', 'active', 'completed'] &&
              data.creatorUid == request.auth.uid &&
-             data.createdAt == request.time;
+             data.createdAt is int;
     }
 
     function isValidVoteDocument(data) {
@@ -85,7 +85,7 @@ service cloud.firestore {
 
     match /users/{userId} {
       allow get: if isSignedIn() && (request.auth.uid == userId || isAdmin());
-      allow list: if isAdmin();
+      allow list: if isVerifiedUser();
       allow create: if isVerifiedUser() && userId == request.auth.uid && isValidUser(incoming()) && incoming().role == 'user';
       allow update: if isVerifiedUser() && userId == request.auth.uid && 
                     incoming().diff(existing()).affectedKeys().hasOnly(['displayName']) &&
@@ -101,11 +101,24 @@ service cloud.firestore {
           existing().initiatorUid == request.auth.uid &&
           incoming().initiatorUid == existing().initiatorUid &&
           incoming().createdAt == existing().createdAt &&
-          incoming().lastUpdated == request.time &&
+          incoming().lastUpdated is int &&
           incoming().diff(existing()).affectedKeys().hasOnly(['name', 'category', 'priority', 'type', 'goal', 'cycle', 'support', 'progress', 'steps', 'datasetIds', 'dimensions', 'lastUpdated'])
         )
       );
       allow delete: if isAdmin() || (isVerifiedUser() && existing().initiatorUid == request.auth.uid);
+    }
+
+    // Legacy UI list (DatasetList) — lightweight dataset rows
+    match /datasets/{datasetId} {
+      allow get, list: if isSignedIn();
+      allow create: if isVerifiedUser() && isValidId(datasetId) &&
+        incoming().keys().hasAll(['name', 'creatorUid', 'createdAt']) &&
+        incoming().name is string && incoming().name.size() > 0 && incoming().name.size() <= 100 &&
+        incoming().creatorUid == request.auth.uid &&
+        incoming().createdAt is int;
+      allow update, delete: if isVerifiedUser() && (
+        isAdmin() || existing().creatorUid == request.auth.uid
+      );
     }
 
     match /evalDatasets/{datasetId} {
@@ -117,8 +130,8 @@ service cloud.firestore {
           existing().creatorUid == request.auth.uid &&
           incoming().creatorUid == existing().creatorUid &&
           incoming().createdAt == existing().createdAt &&
-          incoming().updatedAt == request.time &&
-          incoming().diff(existing()).affectedKeys().hasOnly(['name', 'description', 'tags', 'inputSchema', 'items', 'updatedAt'])
+          incoming().updatedAt is int &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['name', 'description', 'tags', 'inputSchema', 'inputType', 'items', 'updatedAt'])
         )
       );
       allow delete: if isAdmin() || (isVerifiedUser() && existing().creatorUid == request.auth.uid);
@@ -152,15 +165,25 @@ service cloud.firestore {
           incoming().creatorUid == existing().creatorUid &&
           incoming().createdAt == existing().createdAt &&
           existing().status != 'completed' && // Locked if completed
-          incoming().diff(existing()).affectedKeys().hasOnly(['name', 'projectId', 'datasetId', 'templateId', 'models', 'outputType', 'status', 'assignees', 'progress'])
+          incoming().diff(existing()).affectedKeys().hasOnly(['name', 'projectId', 'datasetId', 'templateId', 'models', 'outputType', 'status', 'assignees', 'progress', 'totalItems', 'hasImportedData', 'externalResultsLink'])
         ) || (
-          // Assignees can update ONLY progress
+          // Assignees can update ONLY progress (assignees are stored as emails)
           existing().status == 'active' &&
-          request.auth.uid in existing().assignees &&
+          request.auth.token.email_verified == true &&
+          request.auth.token.email != null &&
+          request.auth.token.email in existing().assignees &&
           incoming().diff(existing()).affectedKeys().hasOnly(['progress'])
         )
       );
       allow delete: if isAdmin() || (isVerifiedUser() && existing().creatorUid == request.auth.uid);
+
+      match /items/{itemId} {
+        allow read: if isSignedIn();
+        allow create: if isVerifiedUser() &&
+          get(/databases/$(database)/documents/evalTasks/$(taskId)).data.creatorUid == request.auth.uid;
+        allow update, delete: if isVerifiedUser() &&
+          get(/databases/$(database)/documents/evalTasks/$(taskId)).data.creatorUid == request.auth.uid;
+      }
 
       match /userVotes/{userUid} {
         allow get: if isSignedIn();

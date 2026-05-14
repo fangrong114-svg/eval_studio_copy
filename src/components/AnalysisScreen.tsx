@@ -4,7 +4,7 @@ import { AggregatedResult, EvalParadigm, EvalTask, EvalTemplate, ModelOutput, Ra
 import { ArenaRankPromptItem, calculateArenaRankCaseSummaries, calculateArenaRankModelStats, getArenaRankModelOutputUrl, getBordaScore, isArenaRankVote, resolveEvaluationItemPrompt, sortRanking } from '../rankingUtils';
 import { RESULTS_TEMPLATE_CSV } from '../constants';
 import { db, handleFirestoreError } from '../firebase';
-import { collection, getDocs, query, orderBy } from '../localPlatform';
+import { collection, getDocs, query, orderBy } from '../datastore';
 import ArenaRankVideoPreviewList from './ArenaRankVideoPreviewList';
 import Papa from 'papaparse';
 

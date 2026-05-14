@@ -3,7 +3,7 @@ import { Dataset } from '../types';
 import { Badge } from './Badge';
 import { Database, Search, Plus, FileText, Image, Music, Video, X, Loader2 } from 'lucide-react';
 import { db, auth } from '../firebase';
-import { collection, addDoc, query, orderBy, onSnapshot } from '../localPlatform';
+import { collection, addDoc, query, orderBy, onSnapshot } from '../datastore';
 
 export function DatasetList({ datasets: initialDatasets }: { datasets: Dataset[] }) {
   const [searchTerm, setSearchTerm] = useState('');

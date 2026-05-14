@@ -223,7 +223,7 @@ export function ModelEvalApp({ initialRoute = 'dashboard' }: ModelEvalAppProps) 
 
     if (activeTaskId && userName) {
       try {
-        const { doc, updateDoc, FieldPath, setDoc } = await import('../localPlatform');
+        const { doc, updateDoc, FieldPath, setDoc } = await import('../datastore');
         const { db } = await import('../firebase');
         const taskRef = doc(db, 'evalTasks', activeTaskId);
         try {
@@ -273,7 +273,7 @@ export function ModelEvalApp({ initialRoute = 'dashboard' }: ModelEvalAppProps) 
 
     if (activeTaskId && userName) {
       try {
-        const { doc, updateDoc, FieldPath, setDoc } = await import('../localPlatform');
+        const { doc, updateDoc, FieldPath, setDoc } = await import('../datastore');
         const { db } = await import('../firebase');
         const taskRef = doc(db, 'evalTasks', activeTaskId);
         try {
@@ -313,7 +313,7 @@ export function ModelEvalApp({ initialRoute = 'dashboard' }: ModelEvalAppProps) 
 
       if (activeTaskId && userName) {
         try {
-          const { doc, updateDoc, FieldPath, setDoc } = await import('../localPlatform');
+          const { doc, updateDoc, FieldPath, setDoc } = await import('../datastore');
           const { db } = await import('../firebase');
           const taskRef = doc(db, 'evalTasks', activeTaskId);
           try {

@@ -3,7 +3,7 @@ import { Database, Plus, Download, Upload, FileText, Settings, ArrowRight, Trash
 import Papa from 'papaparse';
 import { EvalDataset, DatasetSchemaField, SchemaFieldType } from '../types';
 import { db, auth } from '../firebase';
-import { collection, doc, setDoc, onSnapshot, query, orderBy, deleteDoc } from '../localPlatform';
+import { collection, doc, setDoc, onSnapshot, query, orderBy, deleteDoc } from '../datastore';
 import { ConfirmModal } from './ConfirmModal';
 
 interface DatasetRepositoryScreenProps {

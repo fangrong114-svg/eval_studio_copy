@@ -3,7 +3,7 @@ import { Layers, Plus, Search, Filter, Calendar, Users, BarChart2, ArrowRight, A
 import { EvalParadigm, EvaluationProject, EvaluationStep, EvaluationItem, EvalTask } from '../types';
 import { CreateProjectModal } from './CreateProjectModal';
 import { db, auth, signInWithGoogle, logout } from '../firebase';
-import { collection, onSnapshot, addDoc, query, orderBy, doc, updateDoc, where, getDocs, getDoc, setDoc, deleteDoc } from '../localPlatform';
+import { collection, onSnapshot, addDoc, query, orderBy, doc, updateDoc, where, getDocs, getDoc, setDoc, deleteDoc } from '../datastore';
 
 interface DashboardScreenProps {
   initialProject?: EvaluationProject | null;
@@ -291,7 +291,7 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({ initialProject
       if (items.length === 0 && task.datasetId && task.datasetId !== 'external-csv') {
         // Fetch from dataset
         const dsDoc = await getDoc(doc(db, 'evalDatasets', task.datasetId));
-        if (dsDoc.exists()) {
+        if (dsDoc.exists) {
           const dsData = dsDoc.data() as any;
           if (dsData.items && dsData.items.length > 0) {
             items = dsData.items.map((row: any, idx: number) => {
@@ -370,7 +370,7 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({ initialProject
       let existingVotes: any[] = [];
       try {
         const voteDoc = await getDoc(doc(db, 'evalTasks', task.id, 'userVotes', userName));
-        if (voteDoc.exists()) {
+        if (voteDoc.exists) {
           existingVotes = voteDoc.data().votes || [];
         }
         

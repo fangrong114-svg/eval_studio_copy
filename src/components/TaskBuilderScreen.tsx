@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { ArrowLeft, Plus, Save, Trash2, Database, LayoutTemplate, Box, CheckCircle2, Play, Link as LinkIcon, Upload, X, Users, Edit, Eye, Loader2, ClipboardList } from 'lucide-react';
 import { EvalDataset, EvalTemplate, EvalTask, EvalDimension, EvalParadigm, EvaluationItem } from '../types';
 import { db, auth } from '../firebase';
-import { collection, onSnapshot, addDoc, query, orderBy, doc, updateDoc, deleteDoc, where, setDoc, getDocs } from '../localPlatform';
+import { collection, onSnapshot, addDoc, query, orderBy, doc, updateDoc, deleteDoc, where, setDoc, getDocs } from '../datastore';
 import { ConfirmModal } from './ConfirmModal';
 import Papa from 'papaparse';
 import MediaRenderer from './MediaRenderer';
@@ -626,7 +626,7 @@ export default function TaskBuilderScreen({ projectId, onBack, initialMode = 'cr
     setLoadingItems(true);
     try {
       let items: EvaluationItem[] = [];
-      const itemsSnapshot = await getDocs(collection(db, `evalTasks/${task.id}/items`));
+      const itemsSnapshot = await getDocs(collection(db, 'evalTasks', task.id, 'items'));
       if (!itemsSnapshot.empty) {
         items = itemsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as EvaluationItem));
       } else if (task.datasetId && task.datasetId !== 'external-csv') {

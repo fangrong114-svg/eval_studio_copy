@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { LayoutTemplate, Plus, Settings, ArrowRight, Trash2, Edit2, FileText, CheckCircle2 } from 'lucide-react';
 import { EvalTemplate, EvalDimension, EvalParadigm } from '../types';
 import { db, auth } from '../firebase';
-import { collection, doc, setDoc, onSnapshot, query, orderBy, deleteDoc } from '../localPlatform';
+import { collection, doc, setDoc, onSnapshot, query, orderBy, deleteDoc } from '../datastore';
 import { ConfirmModal } from './ConfirmModal';
 
 interface TemplateRepositoryScreenProps {
