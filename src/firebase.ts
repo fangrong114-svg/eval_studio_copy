@@ -13,7 +13,22 @@ const firebaseConfig = {
   appId: import.meta.env.VITE_FIREBASE_APP_ID
 };
 
-const shouldUseFirebase = process.env.NODE_ENV === 'production';
+/**
+ * When true: real Firebase Auth + Firestore. When false: localPlatform (localStorage).
+ * - Set `VITE_USE_FIREBASE=true` to force cloud even in dev (e.g. emulator or staging).
+ * - Set `VITE_USE_FIREBASE=false` to force local even in production builds (e.g. AI Studio preview).
+ * - If unset: follow Vite's `import.meta.env.PROD` (true after `vite build`, false in `vite dev`).
+ *
+ * Prefer this over `process.env.NODE_ENV`: some hosted build pipelines do not define the latter
+ * in the browser bundle, which incorrectly kept production deploys on the local backend.
+ */
+const viteFirebaseFlag = import.meta.env.VITE_USE_FIREBASE;
+export const shouldUseFirebase =
+  viteFirebaseFlag === 'true'
+    ? true
+    : viteFirebaseFlag === 'false'
+      ? false
+      : import.meta.env.PROD;
 
 let db, auth, googleProvider;
 

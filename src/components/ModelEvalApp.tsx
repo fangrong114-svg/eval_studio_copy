@@ -13,7 +13,7 @@ import TemplateRepositoryScreen from './TemplateRepositoryScreen';
 import TaskBuilderScreen from './TaskBuilderScreen';
 import { ConfirmModal } from './ConfirmModal';
 import { AppState, EvalParadigm, EvaluationItem, HistorySession, RankingEntry, VoteRecord, VoteType, EvaluationProject } from '../types';
-import { auth, signInWithGoogle, logout } from '../firebase';
+import { auth, signInWithGoogle, logout, shouldUseFirebase } from '../firebase';
 
 const STORAGE_KEY = 'modeleval_session';
 const HISTORY_KEY = 'modeleval_history';
@@ -397,7 +397,7 @@ export function ModelEvalApp({ initialRoute = 'dashboard' }: ModelEvalAppProps) 
     });
   };
 
-  if (!user && process.env.NODE_ENV === 'production') {
+  if (!user && shouldUseFirebase) {
     return (
       <div className="h-screen flex items-center justify-center bg-gray-100">
         <div className="text-center">
@@ -418,7 +418,7 @@ export function ModelEvalApp({ initialRoute = 'dashboard' }: ModelEvalAppProps) 
     <div className="h-[calc(100vh-64px)] overflow-auto bg-bg-base text-text-primary font-sans selection:bg-amber-500/30">
       {/* Main Container */}
       <div className="h-full">
-      {user && process.env.NODE_ENV === 'production' && (
+      {user && shouldUseFirebase && (
           <div className="absolute top-4 right-4 flex items-center">
             <span className="mr-4">Welcome, {user.displayName}</span>
             <button
