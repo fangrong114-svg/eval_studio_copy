@@ -18,6 +18,14 @@ service cloud.firestore {
     function existing() { return resource.data; }
     function isSignedIn() { return request.auth != null; }
     function isVerifiedUser() { return isSignedIn() && request.auth.token.email_verified == true; }
+    function isOwner(uid) { return isSignedIn() && uid == request.auth.uid; }
+    function signedInEmail() { return request.auth.token.email; }
+    function isProjectCollaborator(data) {
+      return isSignedIn() && (
+        data.initiatorUid == request.auth.uid ||
+        (data.support is list && signedInEmail() in data.support)
+      );
+    }
     
     // Admin check: either in admins collection or a hardcoded bootstrap admin
     function isAdmin() { 
@@ -86,8 +94,8 @@ service cloud.firestore {
     match /users/{userId} {
       allow get: if isSignedIn() && (request.auth.uid == userId || isAdmin());
       allow list: if isVerifiedUser();
-      allow create: if isVerifiedUser() && userId == request.auth.uid && isValidUser(incoming()) && incoming().role == 'user';
-      allow update: if isVerifiedUser() && userId == request.auth.uid && 
+      allow create: if isSignedIn() && userId == request.auth.uid && isValidUser(incoming()) && incoming().role == 'user';
+      allow update: if isSignedIn() && userId == request.auth.uid && 
                     incoming().diff(existing()).affectedKeys().hasOnly(['displayName']) &&
                     incoming().displayName is string && incoming().displayName.size() <= 50;
     }
@@ -95,28 +103,33 @@ service cloud.firestore {
     match /projects/{projectId} {
       allow get: if isSignedIn();
       allow list: if isSignedIn();
-      allow create: if isVerifiedUser() && isValidId(projectId) && isValidProject(incoming());
-      allow update: if isVerifiedUser() && (
+      allow create: if isSignedIn() && isValidId(projectId) && isValidProject(incoming());
+      allow update: if isSignedIn() && (
         isAdmin() || (
-          existing().initiatorUid == request.auth.uid &&
+          isProjectCollaborator(existing()) &&
           incoming().initiatorUid == existing().initiatorUid &&
           incoming().createdAt == existing().createdAt &&
           incoming().lastUpdated is int &&
-          incoming().diff(existing()).affectedKeys().hasOnly(['name', 'category', 'priority', 'type', 'goal', 'cycle', 'support', 'progress', 'steps', 'datasetIds', 'dimensions', 'lastUpdated'])
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'name', 'category', 'priority', 'type', 'goal', 'cycle',
+            'support', 'progress', 'steps', 'datasetIds', 'dimensions',
+            'lastUpdated', 'link', 'resultSummary', 'generatedDataStatus',
+            'analysis'
+          ])
         )
       );
-      allow delete: if isAdmin() || (isVerifiedUser() && existing().initiatorUid == request.auth.uid);
+      allow delete: if isAdmin() || isOwner(existing().initiatorUid);
     }
 
     // Legacy UI list (DatasetList) — lightweight dataset rows
     match /datasets/{datasetId} {
       allow get, list: if isSignedIn();
-      allow create: if isVerifiedUser() && isValidId(datasetId) &&
+      allow create: if isSignedIn() && isValidId(datasetId) &&
         incoming().keys().hasAll(['name', 'creatorUid', 'createdAt']) &&
         incoming().name is string && incoming().name.size() > 0 && incoming().name.size() <= 100 &&
         incoming().creatorUid == request.auth.uid &&
         incoming().createdAt is int;
-      allow update, delete: if isVerifiedUser() && (
+      allow update, delete: if isSignedIn() && (
         isAdmin() || existing().creatorUid == request.auth.uid
       );
     }
@@ -124,8 +137,8 @@ service cloud.firestore {
     match /evalDatasets/{datasetId} {
       allow get: if isSignedIn();
       allow list: if isSignedIn();
-      allow create: if isVerifiedUser() && isValidId(datasetId) && isValidDataset(incoming());
-      allow update: if isVerifiedUser() && (
+      allow create: if isSignedIn() && isValidId(datasetId) && isValidDataset(incoming());
+      allow update: if isSignedIn() && (
         isAdmin() || (
           existing().creatorUid == request.auth.uid &&
           incoming().creatorUid == existing().creatorUid &&
@@ -134,14 +147,14 @@ service cloud.firestore {
           incoming().diff(existing()).affectedKeys().hasOnly(['name', 'description', 'tags', 'inputSchema', 'inputType', 'items', 'updatedAt'])
         )
       );
-      allow delete: if isAdmin() || (isVerifiedUser() && existing().creatorUid == request.auth.uid);
+      allow delete: if isAdmin() || isOwner(existing().creatorUid);
     }
 
     match /evalTemplates/{templateId} {
       allow get: if isSignedIn();
       allow list: if isSignedIn();
-      allow create: if isVerifiedUser() && isValidId(templateId) && isValidTemplate(incoming());
-      allow update: if isVerifiedUser() && (
+      allow create: if isSignedIn() && isValidId(templateId) && isValidTemplate(incoming());
+      allow update: if isSignedIn() && (
         isAdmin() || (
           existing().creatorUid == request.auth.uid &&
           incoming().creatorUid == existing().creatorUid &&
@@ -149,16 +162,17 @@ service cloud.firestore {
           incoming().diff(existing()).affectedKeys().hasOnly(['name', 'description', 'paradigm', 'dimensions'])
         )
       );
-      allow delete: if isAdmin() || (isVerifiedUser() && existing().creatorUid == request.auth.uid);
+      allow delete: if isAdmin() || isOwner(existing().creatorUid);
     }
 
     match /evalTasks/{taskId} {
       allow get: if isSignedIn();
       allow list: if isSignedIn();
-      allow create: if isVerifiedUser() && isValidId(taskId) && isValidTask(incoming()) && 
-                    exists(/databases/$(database)/documents/evalDatasets/$(incoming().datasetId)) &&
+      allow create: if isSignedIn() && isValidId(taskId) && isValidTask(incoming()) &&
+                    (incoming().datasetId == 'external-csv' ||
+                     exists(/databases/$(database)/documents/evalDatasets/$(incoming().datasetId))) &&
                     exists(/databases/$(database)/documents/evalTemplates/$(incoming().templateId));
-      allow update: if isVerifiedUser() && (
+      allow update: if isSignedIn() && (
         isAdmin() || (
           // Creator can update everything except immutable fields
           existing().creatorUid == request.auth.uid &&
@@ -175,19 +189,20 @@ service cloud.firestore {
           incoming().diff(existing()).affectedKeys().hasOnly(['progress'])
         )
       );
-      allow delete: if isAdmin() || (isVerifiedUser() && existing().creatorUid == request.auth.uid);
+      allow delete: if isAdmin() || isOwner(existing().creatorUid);
 
       match /items/{itemId} {
         allow read: if isSignedIn();
-        allow create: if isVerifiedUser() &&
+        allow create: if isSignedIn() &&
           get(/databases/$(database)/documents/evalTasks/$(taskId)).data.creatorUid == request.auth.uid;
-        allow update, delete: if isVerifiedUser() &&
+        allow update, delete: if isSignedIn() &&
           get(/databases/$(database)/documents/evalTasks/$(taskId)).data.creatorUid == request.auth.uid;
       }
 
       match /userVotes/{userUid} {
         allow get: if isSignedIn();
-        allow create, update: if isVerifiedUser() && userUid == request.auth.token.email && isValidVoteDocument(incoming()) &&
+        allow list: if isSignedIn();
+        allow create, update: if isSignedIn() && userUid == request.auth.token.email && isValidVoteDocument(incoming()) &&
                       get(/databases/$(database)/documents/evalTasks/$(taskId)).data.status == 'active';
         allow delete: if isAdmin();
       }
