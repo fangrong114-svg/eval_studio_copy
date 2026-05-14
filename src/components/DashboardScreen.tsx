@@ -21,7 +21,13 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({ initialProject
   const [selectedProject, setSelectedProject] = useState<EvaluationProject | null>(initialProject || null);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [editingStep, setEditingStep] = useState<{projectId: string, step: EvaluationStep} | null>(null);
-  const [user] = useState<any>(auth.currentUser);
+  const [user, setUser] = useState<any>(auth.currentUser);
+
+  useEffect(() => {
+    const unsub = auth.onAuthStateChanged(setUser);
+    return () => unsub();
+  }, []);
+
   const [loading, setLoading] = useState(true);
   const [projectTasks, setProjectTasks] = useState<any[]>([]);
   const [datasets, setDatasets] = useState<any[]>([]);
@@ -72,9 +78,12 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({ initialProject
     const q = query(collection(db, 'projects'), orderBy('createdAt', 'desc'));
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const fetchedProjects: EvaluationProject[] = [];
+      const uid = auth.currentUser?.uid;
       snapshot.forEach((docSnap) => {
         const data = docSnap.data() as EvaluationProject;
-        
+        const canAutoWriteProject =
+          !!uid && data.initiatorUid != null && data.initiatorUid === uid;
+
         // Auto-migrate old projects to the new 3-step structure
         let needsMigration = false;
         let migratedSteps = data.steps;
@@ -103,14 +112,20 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({ initialProject
           ];
         }
 
-        if (needsMigration) {
+        // Only the project initiator may write; otherwise updateDoc fails and this listener would retry forever.
+        if (needsMigration && canAutoWriteProject) {
           const cleanMigratedSteps = JSON.parse(JSON.stringify(migratedSteps));
           updateDoc(doc(db, 'projects', docSnap.id), { steps: cleanMigratedSteps }).catch(console.error);
           data.steps = migratedSteps;
         }
 
-        // Ensure step 1 is never 'pending'
-        if (data.steps && data.steps[0] && data.steps[0].status === 'pending') {
+        // Ensure step 1 is never 'pending' (initiator only — same as above)
+        if (
+          canAutoWriteProject &&
+          data.steps &&
+          data.steps[0] &&
+          data.steps[0].status === 'pending'
+        ) {
           data.steps[0].status = 'in-progress';
           updateDoc(doc(db, 'projects', docSnap.id), { steps: data.steps }).catch(console.error);
         }
